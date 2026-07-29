@@ -23,7 +23,7 @@
   }
 
   function openShare(slug) {
-    shareLink = `${window.location.origin}/join/${slug}`;
+    shareLink = `${window.location.origin}/group/${slug}`;
     showShare = true;
   }
 

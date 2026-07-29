@@ -16,7 +16,7 @@
   let error = $state('');
   let activeTab = $state('expenses');
   let showShare = $state(false);
-  let inviteLink = $derived(slug ? `${window.location.origin}/join/${slug}` : '');
+  let inviteLink = $derived(slug ? `${window.location.origin}/group/${slug}` : '');
 
   // Expense form
   let showExpForm = $state(false);
