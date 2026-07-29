@@ -257,6 +257,12 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     };
   });
 
+  $effect(() => {
+    if (currentMemberId) {
+      payFrom = currentMemberId;
+    }
+  });
+
 </script>
 
 {#if loading}
