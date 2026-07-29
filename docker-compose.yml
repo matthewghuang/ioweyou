@@ -1,0 +1,12 @@
+services:
+  ioweyou:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ioweyou-data:/data
+    # Override the default db path so SQLite lives on the volume
+    command: ["/ioweyou", "-db", "/data/data.db"]
+
+volumes:
+  ioweyou-data:
