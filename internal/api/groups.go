@@ -139,12 +139,12 @@ func JoinGroup(s *Server) http.HandlerFunc {
 
 		memberID, cookieToken, groupID, err := auth.JoinGroup(s.AuthDB, body.Slug, body.Name, body.Secret)
 		if err != nil {
-			if err.Error() == "name already taken in this group" {
-				respondError(w, 409, "name already taken")
-				return
-			}
 			if err.Error() == "group not found" {
 				respondError(w, 404, "group not found")
+				return
+			}
+			if err.Error() == "invalid secret" {
+				respondError(w, 401, "invalid secret")
 				return
 			}
 			respondError(w, 500, err.Error())
