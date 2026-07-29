@@ -13,10 +13,10 @@
     loading = true;
     try {
       setApiKey(apiKey.trim());
-      // Verify the key works by calling an authenticated endpoint
-      await api.get('/api/groups');
-      // Key is valid — mark as logged in
-      onLogin({ id: null, name: 'User', api_key: apiKey.trim() });
+      // Verify the key and get user info
+      const user = await api.get('/api/auth/whoami');
+      // Key is valid — mark as logged in with real user data
+      onLogin({ id: user.id, name: user.name, api_key: apiKey.trim() });
     } catch (e) {
       error = e.message || 'Invalid API key';
       clearApiKey();

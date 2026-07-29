@@ -121,8 +121,8 @@ func GetBalances(s *Server) http.HandlerFunc {
 					continue
 				}
 
-				balances[fromUser] -= amt
-				balances[toUser] += amt
+				balances[fromUser] += amt
+				balances[toUser] -= amt
 			}
 		}
 

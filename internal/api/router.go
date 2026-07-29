@@ -49,6 +49,9 @@ func NewRouter(s *Server) http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(auth.AuthMiddleware(s.AuthDB))
 
+		// Whoami
+		r.Get("/api/auth/whoami", auth.WhoamiHandler())
+
 		// Groups
 		r.Post("/api/groups", CreateGroup(s))
 		r.Get("/api/groups", ListGroups(s))

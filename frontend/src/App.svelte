@@ -47,6 +47,8 @@
   }
 
   function handleLogin(user) {
+    setApiKey(user.api_key);
+    localStorage.setItem('ioweyou_user', JSON.stringify({ id: user.id, name: user.name }));
     currentUser.set({ id: user.id, name: user.name });
     currentPage.set('groups');
   }
@@ -89,9 +91,9 @@
   {/if}
   <main class="container">
     {#if $currentPage === 'register'}
-      <Register {onRegister} {onLoginClick} />
+      <Register onRegister={handleRegister} onLoginClick={handleLoginClick} />
     {:else if $currentPage === 'login'}
-      <Login {onLogin} {onRegisterClick} />
+      <Login onLogin={handleLogin} onRegisterClick={handleRegisterClick} />
     {:else if $currentPage === 'groups'}
       <Groups onSelectGroup={handleSelectGroup} />
     {:else if $currentPage === 'group'}
