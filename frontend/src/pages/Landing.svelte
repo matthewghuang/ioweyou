@@ -93,12 +93,12 @@
           />
         </div>
         <div class="form-group">
-          <label class="form-label" for="secret">Secret phrase</label>
+          <label class="form-label" for="secret">Password</label>
           <input
             id="secret"
             class="form-input"
             type="password"
-            placeholder="Choose a secret phrase"
+            placeholder="Choose a password"
             bind:value={secret}
             required
             disabled={loading}

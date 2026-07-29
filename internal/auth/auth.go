@@ -23,6 +23,12 @@ type MemberInfo struct {
 	UserName string `json:"user_name"`
 }
 
+// Sentinel errors for JoinGroup / CreateGroup flows.
+var (
+	ErrGroupNotFound = fmt.Errorf("group not found")
+	ErrInvalidSecret = fmt.Errorf("invalid secret")
+)
+
 // Context key for authenticated member.
 type contextKey string
 
@@ -139,36 +145,42 @@ func CreateGroup(db *sql.DB, store crdt.StateStore, hlc *crdt.HLC, groupName, cr
 	return slug, memberID, cookieToken, groupID, nil
 }
 
-// JoinGroup adds a new member to an existing group by slug.
+// JoinGroup adds a new member to an existing group, or re-authenticates an existing member.
+// If the user_name already exists in the group, the secret must match the stored hash
+// (re-issues a fresh cookie_token). Otherwise, a new member is created.
 // Returns (memberID, cookieToken, groupID, error).
 func JoinGroup(db *sql.DB, slug, userName, secret string) (memberID, cookieToken, groupID string, err error) {
 	// Look up group_id from slug
 	err = db.QueryRow("SELECT group_id FROM group_slugs WHERE slug = ?", slug).Scan(&groupID)
 	if err == sql.ErrNoRows {
-		return "", "", "", fmt.Errorf("group not found")
+		return "", "", "", ErrGroupNotFound
 	}
 	if err != nil {
 		return "", "", "", fmt.Errorf("lookup slug: %w", err)
 	}
 
-	// Verify the secret matches the group's shared secret (first member's secret_hash)
-	var existingHash string
-	if err := db.QueryRow("SELECT secret_hash FROM members WHERE group_id = ? LIMIT 1", groupID).Scan(&existingHash); err != nil {
-		return "", "", "", fmt.Errorf("cannot verify group secret: %w", err)
+	// Check if this user already exists in the group
+	var existingID, existingHash string
+	err = db.QueryRow("SELECT member_id, secret_hash FROM members WHERE group_id = ? AND user_name = ?", groupID, userName).Scan(&existingID, &existingHash)
+	if err == nil {
+		// Member exists — verify secret and re-issue token
+		if HashSecret(secret) != existingHash {
+			return "", "", "", ErrInvalidSecret
+		}
+		cookieToken, err = GenerateToken()
+		if err != nil {
+			return "", "", "", fmt.Errorf("generate token: %w", err)
+		}
+		if _, err = db.Exec("UPDATE members SET cookie_token = ? WHERE member_id = ?", cookieToken, existingID); err != nil {
+			return "", "", "", fmt.Errorf("update token: %w", err)
+		}
+		return existingID, cookieToken, groupID, nil
 	}
-	if HashSecret(secret) != existingHash {
-		return "", "", "", fmt.Errorf("invalid secret")
+	if err != sql.ErrNoRows {
+		return "", "", "", fmt.Errorf("lookup member: %w", err)
 	}
 
-	// Check for duplicate user_name in group
-	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM members WHERE group_id = ? AND user_name = ?", groupID, userName).Scan(&count); err != nil {
-		return "", "", "", fmt.Errorf("duplicate check: %w", err)
-	}
-	if count > 0 {
-		return "", "", "", fmt.Errorf("name already taken in this group")
-	}
-
+	// New member — create
 	memberID = uuid.New().String()
 	secretHash := HashSecret(secret)
 	cookieToken, err = GenerateToken()

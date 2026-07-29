@@ -81,7 +81,7 @@
 <div class="auth-page">
   <div class="auth-card card">
     <h1 class="auth-title">Join Group</h1>
-    <p class="auth-subtitle">Enter your name and secret to join</p>
+    <p class="auth-subtitle">Choose your name and password to join</p>
 
     {#if error}
       <div class="alert alert-error">{error}</div>
@@ -134,12 +134,12 @@
         />
       </div>
       <div class="form-group">
-        <label class="form-label" for="join-secret">Secret phrase</label>
+        <label class="form-label" for="join-secret">Password</label>
         <input
           id="join-secret"
           class="form-input"
           type="password"
-          placeholder="Choose a secret phrase"
+          placeholder="Choose a password"
           bind:value={secret}
           required
           disabled={loading}
