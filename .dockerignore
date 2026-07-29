@@ -1,0 +1,30 @@
+# Version control
+.git
+.gitignore
+
+# Dependencies
+node_modules/
+
+# Documentation
+docs/
+
+# IDE / local dev
+.hermes/
+.omp/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker files
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Build output (unlikely in Go, but just in case)
+/target
