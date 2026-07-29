@@ -1,7 +1,8 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { currentPage, currentUser, currentGroupId } from './lib/stores.js';
   import { api, getApiKey, setApiKey, clearApiKey } from './lib/api.js';
+  import { connect, disconnect } from './lib/websocket.js';
 
   import Register from './pages/Register.svelte';
   import Login from './pages/Login.svelte';
@@ -9,6 +10,10 @@
   import GroupDetail from './pages/GroupDetail.svelte';
 
   let loading = $state(true);
+
+  onDestroy(() => {
+    disconnect();
+  });
 
   onMount(async () => {
     const key = getApiKey();
@@ -19,6 +24,7 @@
         if (stored) {
           currentUser.set(JSON.parse(stored));
         }
+        connect();
         currentPage.set('groups');
       } catch {
         clearApiKey();
@@ -32,6 +38,7 @@
   });
 
   function handleLogout() {
+    disconnect();
     clearApiKey();
     localStorage.removeItem('ioweyou_user');
     currentUser.set(null);
@@ -43,6 +50,7 @@
     setApiKey(user.api_key);
     localStorage.setItem('ioweyou_user', JSON.stringify({ id: user.id, name: user.name }));
     currentUser.set({ id: user.id, name: user.name });
+    connect();
     currentPage.set('groups');
   }
 
@@ -50,6 +58,7 @@
     setApiKey(user.api_key);
     localStorage.setItem('ioweyou_user', JSON.stringify({ id: user.id, name: user.name }));
     currentUser.set({ id: user.id, name: user.name });
+    connect();
     currentPage.set('groups');
   }
 
@@ -59,6 +68,7 @@
   }
 
   function handleBackToGroups() {
+    import('./lib/websocket.js').then(m => m.unsubscribe());
     currentPage.set('groups');
   }
 

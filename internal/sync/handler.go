@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/matthewghuang/ioweyou/internal/crdt"
 )
@@ -180,8 +179,12 @@ func resolvePushGroups(db *sql.DB, docIDs map[string]bool) []string {
 	var groups []string
 
 	for docID := range docIDs {
-		// Group documents broadcast to themselves.
-		if strings.HasPrefix(docID, "group:") {
+		// Check if this doc is a group document (has a "name" field)
+		var hasName int
+		db.QueryRow(
+			`SELECT COUNT(*) FROM crdt_operations
+			 WHERE doc_id = ? AND op_type = 'lww' AND field = 'name'`, docID).Scan(&hasName)
+		if hasName > 0 {
 			if !seen[docID] {
 				seen[docID] = true
 				groups = append(groups, docID)

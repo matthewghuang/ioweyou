@@ -1,7 +1,8 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { currentGroupId, currentUser } from '../lib/stores.js';
   import { api } from '../lib/api.js';
+  import { subscribe, setOnUpdate } from '../lib/websocket.js';
 
   let { onBack } = $props();
 
@@ -249,6 +250,15 @@
   onMount(() => {
     currentUserId = getCurrentUserId();
     loadAll();
+    // Subscribe to real-time updates for this group
+    if (groupId) subscribe(groupId);
+    setOnUpdate(() => {
+      loadAll();
+    });
+  });
+
+  onDestroy(() => {
+    setOnUpdate(null);
   });
 </script>
 
