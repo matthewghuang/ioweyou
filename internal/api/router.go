@@ -52,11 +52,15 @@ func NewRouter(s *Server) http.Handler {
 		// Whoami
 		r.Get("/api/auth/whoami", auth.WhoamiHandler())
 
+		// Users
+		r.Get("/api/users", ListUsers(s))
+
 		// Groups
 		r.Post("/api/groups", CreateGroup(s))
 		r.Get("/api/groups", ListGroups(s))
 		r.Get("/api/groups/{id}", GetGroup(s))
 		r.Patch("/api/groups/{id}", UpdateGroup(s))
+		r.Post("/api/groups/{id}/members", AddMember(s))
 
 		// Expenses
 		r.Post("/api/groups/{id}/expenses", CreateExpense(s))

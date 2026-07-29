@@ -145,6 +145,51 @@ func GetGroup(s *Server) http.HandlerFunc {
 	}
 }
 
+// AddMember handles POST /api/groups/{id}/members
+// Adds a user to the group. Only existing group members can add new members.
+func AddMember(s *Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := auth.UserFromContext(r.Context())
+		if user == nil {
+			respondError(w, 401, "unauthorized")
+			return
+		}
+
+		gid := chi.URLParam(r, "id")
+		if !isGroupMember(s.AuthDB, gid, user.ID) {
+			respondError(w, 403, "not a member")
+			return
+		}
+
+		var body struct {
+			UserID string `json:"user_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
+			respondError(w, 400, "user_id required")
+			return
+		}
+
+		// Verify the user exists
+		var exists int
+		s.AuthDB.QueryRow("SELECT COUNT(*) FROM users WHERE id = ?", body.UserID).Scan(&exists)
+		if exists == 0 {
+			respondError(w, 404, "user not found")
+			return
+		}
+
+		_, err := s.AuthDB.Exec("INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)", gid, body.UserID)
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+
+		state, _ := s.Store.GetLatestState(gid)
+		state["id"] = gid
+		state["members"] = getGroupMembers(s.AuthDB, gid)
+		respondJSON(w, 201, state)
+	}
+}
+
 func UpdateGroup(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		gid := chi.URLParam(r, "id")

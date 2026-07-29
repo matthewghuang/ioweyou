@@ -35,6 +35,39 @@
 
   let currentUserId = $state(null);
 
+  // Add member state
+  let showAddMember = $state(false);
+  let memberSearch = $state('');
+  let searchResults = $state([]);
+  let searchingMembers = $state(false);
+
+  async function handleSearchUsers() {
+    if (!memberSearch.trim()) {
+      searchResults = [];
+      return;
+    }
+    searchingMembers = true;
+    try {
+      searchResults = await api.get('/api/users?q=' + encodeURIComponent(memberSearch.trim()));
+    } catch {
+      searchResults = [];
+    } finally {
+      searchingMembers = false;
+    }
+  }
+
+  async function handleAddMember(uid) {
+    try {
+      await api.post('/api/groups/' + groupId + '/members', { user_id: uid });
+      memberSearch = '';
+      searchResults = [];
+      showAddMember = false;
+      await loadAll();
+    } catch (e) {
+      alert('Failed to add member: ' + e.message);
+    }
+  }
+
   // ---- Helpers ----
 
   function truncId(id) {
@@ -233,7 +266,31 @@
         {#each members as m}
           <span class="member-chip" title={m.id}>{m.name}</span>
         {/each}
+        <button class="btn btn-sm" onclick={() => showAddMember = !showAddMember}>
+          {showAddMember ? 'Cancel' : '+ Invite'}
+        </button>
       </div>
+      {#if showAddMember}
+        <div class="add-member-row">
+          <input class="form-input add-member-input" type="text" placeholder="Search users by name..." bind:value={memberSearch} oninput={handleSearchUsers} />
+          {#if searchingMembers}
+            <span class="spinner" style="display:inline-block;width:1rem;height:1rem;margin-left:0.5rem;"></span>
+          {/if}
+          {#if searchResults.length > 0}
+            <div class="search-results">
+              {#each searchResults as u}
+                <button class="search-result-item" onclick={() => handleAddMember(u.id)}>
+                  {u.name}
+                </button>
+              {/each}
+            </div>
+          {:else if memberSearch.trim() && !searchingMembers}
+            <div class="search-results">
+              <div class="search-result-item hint">No users found</div>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 
@@ -402,7 +459,7 @@
       {#each payments as pay}
         <div class="card">
           <div class="card-header">
-            <span class="card-title">{truncId(pay.from_user)} &rarr; {truncId(pay.to_user)}</span>
+            <span class="card-title">{getMemberName(pay.from_user)} &rarr; {getMemberName(pay.to_user)}</span>
             <span class="amount">${fmt(pay.amount)}</span>
           </div>
           <div class="exp-meta">
@@ -550,5 +607,54 @@
   .bal-arrow {
     color: var(--text-muted);
     font-size: 1.1rem;
+  }
+
+  .add-member-row {
+    margin-top: 0.75rem;
+    position: relative;
+  }
+
+  .add-member-input {
+    width: 100%;
+    max-width: 320px;
+  }
+
+  .search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 10;
+    min-width: 200px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+
+  .search-result-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border: none;
+    background: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+
+  .search-result-item:hover {
+    background: var(--hover);
+  }
+
+  .search-result-item.hint {
+    color: var(--text-muted);
+    cursor: default;
+  }
+
+  .search-result-item.hint:hover {
+    background: none;
   }
 </style>
