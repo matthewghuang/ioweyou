@@ -104,7 +104,7 @@ func CreateExpense(s *Server) http.HandlerFunc {
 			for _, m := range members {
 				ts = s.HLC.Now()
 				itemID := uuid.New().String()
-				spVal, _ := json.Marshal(SplitInput{UserID: m, Amount: splitAmt})
+				spVal, _ := json.Marshal(SplitInput{UserID: m["id"], Amount: splitAmt})
 				s.Store.Append(crdt.Operation{
 					DocID: docID, OpType: crdt.OpRGAInsert, Field: "splits",
 					Value: spVal, ItemID: itemID, PrevItemID: prevItemID,

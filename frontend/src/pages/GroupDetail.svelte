@@ -92,8 +92,8 @@
     if (expSplitType === 'custom' && members.length > 0) {
       const existing = new Map(expCustomSplits.map(s => [s.user_id, s.amount]));
       expCustomSplits = members.map(m => ({
-        user_id: m,
-        amount: existing.get(m) || 0,
+        user_id: m.id,
+        amount: existing.get(m.id) || 0,
       }));
     }
   }
@@ -198,8 +198,8 @@
   // ---- Split helpers for display ----
 
   function getMemberName(uid) {
-    const idx = members.indexOf(uid);
-    if (idx >= 0) return 'Member ' + (idx + 1);
+    const member = members.find(m => m.id === uid);
+    if (member) return member.name;
     return truncId(uid);
   }
 
@@ -231,7 +231,7 @@
       <h2 class="detail-title">{group.name}</h2>
       <div class="member-chips">
         {#each members as m}
-          <span class="member-chip" title={m}>{truncId(m)}</span>
+          <span class="member-chip" title={m.id}>{m.name}</span>
         {/each}
       </div>
     </div>
@@ -365,7 +365,7 @@
               <select id="pay-from" class="form-select" bind:value={payFrom} required disabled={payCreating}>
                 <option value="">Select payer</option>
                 {#each members as m}
-                  <option value={m}>{getMemberName(m)}</option>
+                  <option value={m.id}>{m.name}</option>
                 {/each}
               </select>
             </div>
@@ -374,7 +374,7 @@
               <select id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
                 <option value="">Select recipient</option>
                 {#each members as m}
-                  <option value={m}>{getMemberName(m)}</option>
+                  <option value={m.id}>{m.name}</option>
                 {/each}
               </select>
             </div>

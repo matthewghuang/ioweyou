@@ -17,17 +17,17 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
-func getGroupMembers(db *sql.DB, groupID string) []string {
-	rows, err := db.Query("SELECT user_id FROM group_members WHERE group_id = ?", groupID)
+func getGroupMembers(db *sql.DB, groupID string) []map[string]string {
+	rows, err := db.Query(`SELECT u.id, u.name FROM group_members gm JOIN users u ON u.id = gm.user_id WHERE gm.group_id = ?`, groupID)
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
-	var members []string
+	var members []map[string]string
 	for rows.Next() {
-		var uid string
-		if rows.Scan(&uid) == nil {
-			members = append(members, uid)
+		var id, name string
+		if rows.Scan(&id, &name) == nil {
+			members = append(members, map[string]string{"id": id, "name": name})
 		}
 	}
 	return members
