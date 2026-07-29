@@ -14,6 +14,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	dbPath := flag.String("db", "data.db", "SQLite database path")
+	staticDir := flag.String("static", "frontend/dist", "frontend static files directory")
 	flag.Parse()
 
 	// Initialize store (opens DB, runs schema)
@@ -37,8 +38,8 @@ func main() {
 		Broadcaster: bcast,
 	}
 
-	// Create router with all routes
-	router := api.NewRouter(srv)
+	// Create router with frontend
+	router := api.NewRouter(srv, *staticDir)
 
 	log.Printf("starting server on %s (db: %s)", *addr, *dbPath)
 	if err := http.ListenAndServe(*addr, router); err != nil {

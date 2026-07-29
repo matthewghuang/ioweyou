@@ -6,7 +6,7 @@ services:
     volumes:
       - ioweyou-data:/data
     # Override the default db path so SQLite lives on the volume
-    command: ["/ioweyou", "-db", "/data/data.db"]
+    command: ["-db", "/data/data.db", "-static", "/frontend/dist"]
 
 volumes:
   ioweyou-data:
