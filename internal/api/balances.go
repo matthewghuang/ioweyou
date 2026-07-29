@@ -153,28 +153,59 @@ func GetBalances(s *Server) http.HandlerFunc {
 		sort.Strings(creditors)
 
 		computeBreakdown := func(debtor, creditor string, capAmount float64) []BreakdownItem {
-			remaining := capAmount
-			var items []BreakdownItem
+			var forward, reverse []debtEdge
 			for _, d := range allDebts {
-				if remaining < 0.01 {
-					break
-				}
 				if d.fromUser == debtor && d.toUser == creditor {
-					used := math.Min(d.amount, remaining)
-					items = append(items, BreakdownItem{
-						ExpenseName: d.expenseName,
-						Amount:      math.Round(used*100) / 100,
-					})
-					remaining -= used
+					forward = append(forward, d)
 				} else if d.fromUser == creditor && d.toUser == debtor {
-					// reverse direction: reduces what debtor owes
-					used := math.Min(d.amount, remaining)
-					items = append(items, BreakdownItem{
-						ExpenseName: d.expenseName,
-						Amount:      -math.Round(used*100) / 100,
-					})
-					remaining -= used
+					reverse = append(reverse, d)
 				}
+			}
+
+			// Compute full net total from all direct edges between the pair
+			var fwdTotal, revTotal float64
+			for _, d := range forward {
+				fwdTotal += d.amount
+			}
+			for _, d := range reverse {
+				revTotal += d.amount
+			}
+			netTotal := fwdTotal - revTotal
+
+			if netTotal < 0.01 {
+				// Edge net contradicts transfer direction (transitive debt through a third party)
+				return nil
+			}
+
+			// Scale proportionally so breakdown sums to the transfer amount
+			// capAmount may be less than netTotal when third parties affect balances
+			scale := capAmount / netTotal
+			if scale > 1.0 {
+				scale = 1.0
+			}
+
+			items := make([]BreakdownItem, 0, len(forward)+len(reverse))
+			for _, d := range forward {
+				amt := math.Round(d.amount*scale*100) / 100
+				if amt >= 0.01 {
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: amt})
+				}
+			}
+			for _, d := range reverse {
+				amt := math.Round(d.amount*scale*100) / 100
+				if amt >= 0.01 {
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: -amt})
+				}
+			}
+
+			// Absorb rounding pennies into the last item
+			sum := 0.0
+			for _, b := range items {
+				sum += b.Amount
+			}
+			diff := math.Round((capAmount-sum)*100) / 100
+			if math.Abs(diff) >= 0.005 {
+				items = append(items, BreakdownItem{ExpenseName: "Remaining balance", Amount: diff})
 			}
 			return items
 		}
@@ -190,18 +221,6 @@ func GetBalances(s *Server) http.HandlerFunc {
 				breakdown := computeBreakdown(debtor, creditor, rounded)
 				if breakdown == nil {
 					breakdown = []BreakdownItem{}
-				}
-				// Absorb any rounding remainder into the last item so breakdown sums exactly to amount
-				if len(breakdown) > 0 {
-					sum := 0.0
-					for _, b := range breakdown {
-						sum += b.Amount
-					}
-					diff := math.Round((rounded-sum)*100) / 100
-					if math.Abs(diff) > 0.001 {
-						breakdown[len(breakdown)-1].Amount += diff
-						breakdown[len(breakdown)-1].Amount = math.Round(breakdown[len(breakdown)-1].Amount*100) / 100
-					}
 				}
 				settlements = append(settlements, BalanceEntry{
 					From:      debtor,
