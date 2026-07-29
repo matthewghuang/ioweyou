@@ -12,7 +12,7 @@
   let result = $state(null);
   let showShare = $state(false);
 
-  let inviteLink = $derived(result ? `${window.location.origin}/join/${result.id}` : '');
+  let inviteLink = $derived(result ? `${window.location.origin}/group/${result.id}` : '');
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -115,7 +115,7 @@
 
       <p class="auth-alt">
         Have an invite link?
-        <a href="/join" class="link-btn">Join a group</a>
+        <a href="/group" class="link-btn">Join a group</a>
       </p>
     {/if}
 

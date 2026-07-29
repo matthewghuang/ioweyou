@@ -16,19 +16,28 @@
 
     // Check URL path for initial page
     const path = window.location.pathname;
-    const joinMatch = path.match(/^\/join\/(.+)/);
-    if (joinMatch) {
-      currentPage.set('join');
+
+    // Handle direct deep-link to a group — either show group or join form
+    const groupMatch = path.match(/^\/group\/(.+)/);
+    if (groupMatch) {
+      const slug = decodeURIComponent(groupMatch[1]);
+      const token = getToken(slug);
+      if (token) {
+        currentGroupSlug.set(slug);
+        currentPage.set('group');
+      } else {
+        currentPage.set('join');
+      }
       loading = false;
       return;
     }
-    if (path === '/join') {
+    if (path === '/group') {
       currentPage.set('join');
       loading = false;
       return;
     }
 
-    // Handle direct deep-link to a group
+    // Handle direct deep-link to a group (legacy /groups/ path)
     const groupsMatch = path.match(/^\/groups\/(.+)/);
     if (groupsMatch) {
       const slug = decodeURIComponent(groupsMatch[1]);
@@ -66,9 +75,19 @@
       const slug = path.slice('/groups/'.length);
       currentGroupSlug.set(slug);
       currentPage.set('group');
-    } else if (path === '/join' || path.startsWith('/join/')) {
+    } else if (path === '/group') {
       currentPage.set('join');
       currentGroupSlug.set(null);
+    } else if (path.startsWith('/group/')) {
+      const slug = path.slice('/group/'.length);
+      const token = getToken(slug);
+      if (token) {
+        currentGroupSlug.set(slug);
+        currentPage.set('group');
+      } else {
+        currentPage.set('join');
+        currentGroupSlug.set(null);
+      }
     } else {
       currentPage.set('landing');
       currentGroupSlug.set(null);

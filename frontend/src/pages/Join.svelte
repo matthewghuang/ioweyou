@@ -15,7 +15,7 @@
 
   function initSlug() {
     const path = window.location.pathname;
-    const match = path.match(/\/join\/([^\/]+)/);
+    const match = path.match(/\/group\/([^\/]+)/);
     if (match) {
       slug = decodeURIComponent(match[1]);
       loadGroupInfo();
