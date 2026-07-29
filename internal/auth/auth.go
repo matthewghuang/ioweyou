@@ -104,6 +104,28 @@ func UserFromContext(ctx context.Context) *User {
 // RegisterHandler handles POST /api/auth/register
 // Request body: {"name": "Alice"}
 // Response: {"id": "...", "name": "Alice", "api_key": "..."}
+// WhoamiHandler handles GET /api/auth/whoami
+// Returns the current authenticated user's id and name.
+func WhoamiHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := UserFromContext(r.Context())
+		if user == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"id":   user.ID,
+			"name": user.Name,
+		})
+	}
+}
+
+// RegisterHandler handles POST /api/auth/register
+// Request body: {"name": "Alice"}
+// Response: {"id": "...", "name": "Alice", "api_key": "..."}
 func RegisterHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

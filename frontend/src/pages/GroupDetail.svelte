@@ -1,0 +1,554 @@
+<script>
+  import { onMount } from 'svelte';
+  import { currentGroupId, currentUser } from '../lib/stores.js';
+  import { api } from '../lib/api.js';
+
+  let { onBack } = $props();
+
+  let groupId = $derived($currentGroupId);
+  let group = $state(null);
+  let members = $state([]);
+  let expenses = $state([]);
+  let payments = $state([]);
+  let balances = $state([]);
+  let loading = $state(true);
+  let error = $state('');
+  let activeTab = $state('expenses');
+
+  // Expense form
+  let showExpForm = $state(false);
+  let expDesc = $state('');
+  let expAmt = $state(0);
+  let expSplitType = $state('equal');
+  let expCustomSplits = $state([]);
+  let expCreating = $state(false);
+  let expError = $state('');
+
+  // Payment form
+  let showPayForm = $state(false);
+  let payFrom = $state('');
+  let payTo = $state('');
+  let payAmt = $state(0);
+  let payMethod = $state('');
+  let payCreating = $state(false);
+  let payError = $state('');
+
+  let currentUserId = $state(null);
+
+  // ---- Helpers ----
+
+  function truncId(id) {
+    return id ? id.slice(0, 8) + '…' : '?';
+  }
+
+  function formatDate(ts) {
+    if (!ts) return '';
+    const d = new Date(Math.floor(Number(ts) / 1e6));
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+      ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function fmt(n) {
+    return Number(n || 0).toFixed(2);
+  }
+
+  // ---- Data loading ----
+
+  async function loadAll() {
+    if (!groupId) return;
+    error = '';
+    loading = true;
+    try {
+      const [g, exps, pays, bals] = await Promise.all([
+        api.get(`/api/groups/${groupId}`),
+        api.get(`/api/groups/${groupId}/expenses`),
+        api.get(`/api/groups/${groupId}/payments`),
+        api.get(`/api/groups/${groupId}/balances`),
+      ]);
+      group = g;
+      members = g.members || [];
+      expenses = exps;
+      payments = pays;
+      balances = bals;
+    } catch (e) {
+      error = e.message;
+    } finally {
+      loading = false;
+    }
+  }
+
+  // ---- Expense form ----
+
+  function resetExpForm() {
+    expDesc = '';
+    expAmt = 0;
+    expSplitType = 'equal';
+    expCustomSplits = [];
+    expError = '';
+    showExpForm = false;
+  }
+
+  function handleSplitTypeChange() {
+    if (expSplitType === 'custom' && members.length > 0) {
+      const existing = new Map(expCustomSplits.map(s => [s.user_id, s.amount]));
+      expCustomSplits = members.map(m => ({
+        user_id: m,
+        amount: existing.get(m) || 0,
+      }));
+    }
+  }
+
+  async function handleCreateExpense(e) {
+    e.preventDefault();
+    expError = '';
+    expCreating = true;
+    try {
+      const body = {
+        description: expDesc,
+        amount: parseFloat(expAmt),
+        split_type: expSplitType,
+      };
+      if (expSplitType === 'custom') {
+        body.splits = expCustomSplits
+          .filter(s => s.amount > 0)
+          .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+      }
+      await api.post(`/api/groups/${groupId}/expenses`, body);
+      resetExpForm();
+      const [exps, bals] = await Promise.all([
+        api.get(`/api/groups/${groupId}/expenses`),
+        api.get(`/api/groups/${groupId}/balances`),
+      ]);
+      expenses = exps;
+      balances = bals;
+    } catch (e) {
+      expError = e.message;
+    } finally {
+      expCreating = false;
+    }
+  }
+
+  // ---- Payment form ----
+
+  function resetPayForm() {
+    payFrom = currentUserId || '';
+    payTo = '';
+    payAmt = 0;
+    payMethod = '';
+    payError = '';
+    showPayForm = false;
+  }
+
+  async function handleCreatePayment(e) {
+    e.preventDefault();
+    payError = '';
+    payCreating = true;
+    try {
+      await api.post(`/api/groups/${groupId}/payments`, {
+        from_user: payFrom,
+        to_user: payTo,
+        amount: parseFloat(payAmt),
+        method: payMethod || undefined,
+      });
+      resetPayForm();
+      const [pays, bals] = await Promise.all([
+        api.get(`/api/groups/${groupId}/payments`),
+        api.get(`/api/groups/${groupId}/balances`),
+      ]);
+      payments = pays;
+      balances = bals;
+    } catch (e) {
+      payError = e.message;
+    } finally {
+      payCreating = false;
+    }
+  }
+
+  // ---- Payment actions ----
+
+  async function handleConfirmPayment(payId) {
+    try {
+      await api.post(`/api/payments/${payId}/confirm`);
+      const [pays, bals] = await Promise.all([
+        api.get(`/api/groups/${groupId}/payments`),
+        api.get(`/api/groups/${groupId}/balances`),
+      ]);
+      payments = pays;
+      balances = bals;
+    } catch (e) {
+      alert('Failed to confirm: ' + e.message);
+    }
+  }
+
+  async function handleCancelPayment(payId) {
+    if (!confirm('Cancel this payment?')) return;
+    try {
+      await api.del(`/api/payments/${payId}`);
+      const [pays, bals] = await Promise.all([
+        api.get(`/api/groups/${groupId}/payments`),
+        api.get(`/api/groups/${groupId}/balances`),
+      ]);
+      payments = pays;
+      balances = bals;
+    } catch (e) {
+      alert('Failed to cancel: ' + e.message);
+    }
+  }
+
+  // ---- Split helpers for display ----
+
+  function getMemberName(uid) {
+    const idx = members.indexOf(uid);
+    if (idx >= 0) return 'Member ' + (idx + 1);
+    return truncId(uid);
+  }
+
+  // ---- Init ----
+
+  function getCurrentUserId() {
+    try {
+      const stored = localStorage.getItem('ioweyou_user');
+      if (stored) return JSON.parse(stored).id;
+    } catch {}
+    return null;
+  }
+
+  onMount(() => {
+    currentUserId = getCurrentUserId();
+    loadAll();
+  });
+</script>
+
+{#if loading}
+  <div class="empty-state"><span class="spinner"></span> Loading group…</div>
+{:else if error}
+  <div class="alert alert-error">{error}</div>
+  <button class="btn" onclick={loadAll}>Retry</button>
+{:else if group}
+  <div class="detail-header">
+    <button class="btn btn-sm" onclick={onBack}>&larr; Back</button>
+    <div class="detail-header-info">
+      <h2 class="detail-title">{group.name}</h2>
+      <div class="member-chips">
+        {#each members as m}
+          <span class="member-chip" title={m}>{truncId(m)}</span>
+        {/each}
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button
+      class="tab"
+      class:active={activeTab === 'expenses'}
+      onclick={() => activeTab = 'expenses'}
+    >Expenses ({expenses.length})</button>
+    <button
+      class="tab"
+      class:active={activeTab === 'payments'}
+      onclick={() => activeTab = 'payments'}
+    >Payments ({payments.length})</button>
+    <button
+      class="tab"
+      class:active={activeTab === 'balances'}
+      onclick={() => activeTab = 'balances'}
+    >Settlements</button>
+  </div>
+
+  <!-- ==================== EXPENSES TAB ==================== -->
+  {#if activeTab === 'expenses'}
+    <div class="section-actions">
+      <button class="btn btn-primary btn-sm" onclick={() => showExpForm = !showExpForm}>
+        {showExpForm ? 'Cancel' : '+ Add Expense'}
+      </button>
+    </div>
+
+    {#if showExpForm}
+      <div class="form-section">
+        <div class="form-section-title">New Expense</div>
+        {#if expError}
+          <div class="alert alert-error">{expError}</div>
+        {/if}
+        <form onsubmit={handleCreateExpense}>
+          <div class="form-group">
+            <label class="form-label" for="exp-desc">Description</label>
+            <input id="exp-desc" class="form-input" type="text" placeholder="e.g. Dinner" bind:value={expDesc} required disabled={expCreating} />
+          </div>
+          <div class="field-row">
+            <div class="form-group">
+              <label class="form-label" for="exp-amt">Amount</label>
+              <input id="exp-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={expAmt} required disabled={expCreating} />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="exp-split">Split type</label>
+              <select id="exp-split" class="form-select" bind:value={expSplitType} disabled={expCreating} onchange={handleSplitTypeChange}>
+                <option value="equal">Equal</option>
+                <option value="custom">Custom</option>
+              </select>
+            </div>
+          </div>
+
+          {#if expSplitType === 'custom' && expCustomSplits.length > 0}
+            <div class="form-section-title" style="margin-top: 0.75rem;">Split amounts</div>
+            {#each expCustomSplits as split, i}
+              <div class="split-row">
+                <span class="uuid-short">{getMemberName(split.user_id)}</span>
+                <input
+                  class="form-input split-input"
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  bind:value={expCustomSplits[i].amount}
+                  disabled={expCreating}
+                />
+              </div>
+            {/each}
+          {/if}
+
+          <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;">
+            {expCreating ? 'Adding…' : 'Add Expense'}
+          </button>
+        </form>
+      </div>
+    {/if}
+
+    {#if expenses.length === 0}
+      <div class="empty-state">No expenses yet.</div>
+    {:else}
+      {#each expenses as exp}
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">{exp.description}</span>
+            <span class="amount">${fmt(exp.amount)}</span>
+          </div>
+          <div class="exp-meta">
+            <span class="badge">paid by {truncId(exp.paid_by)}</span>
+            <span class="badge">{exp.split_type}</span>
+            {#if exp.created_at}
+              <span class="list-item-subtitle">{formatDate(exp.created_at)}</span>
+            {/if}
+          </div>
+          {#if exp.splits && exp.splits.length > 0}
+            <div class="split-list">
+              {#each exp.splits as split}
+                <div class="split-item">
+                  <span class="uuid-short">{getMemberName(split.user_id)}</span>
+                  <span class="amount">${fmt(split.amount)}</span>
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      {/each}
+    {/if}
+
+  <!-- ==================== PAYMENTS TAB ==================== -->
+  {:else if activeTab === 'payments'}
+    <div class="section-actions">
+      <button class="btn btn-primary btn-sm" onclick={() => showPayForm = !showPayForm}>
+        {showPayForm ? 'Cancel' : '+ Record Payment'}
+      </button>
+    </div>
+
+    {#if showPayForm}
+      <div class="form-section">
+        <div class="form-section-title">Record Payment</div>
+        {#if payError}
+          <div class="alert alert-error">{payError}</div>
+        {/if}
+        <form onsubmit={handleCreatePayment}>
+          <div class="field-row">
+            <div class="form-group">
+              <label class="form-label" for="pay-from">From (payer)</label>
+              <select id="pay-from" class="form-select" bind:value={payFrom} required disabled={payCreating}>
+                <option value="">Select payer</option>
+                {#each members as m}
+                  <option value={m}>{getMemberName(m)}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="pay-to">To (recipient)</label>
+              <select id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
+                <option value="">Select recipient</option>
+                {#each members as m}
+                  <option value={m}>{getMemberName(m)}</option>
+                {/each}
+              </select>
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="form-group">
+              <label class="form-label" for="pay-amt">Amount</label>
+              <input id="pay-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={payAmt} required disabled={payCreating} />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="pay-method">Method (optional)</label>
+              <input id="pay-method" class="form-input" type="text" placeholder="e.g. Venmo" bind:value={payMethod} disabled={payCreating} />
+            </div>
+          </div>
+          <button class="btn btn-primary" type="submit" disabled={payCreating}>
+            {payCreating ? 'Recording…' : 'Record Payment'}
+          </button>
+        </form>
+      </div>
+    {/if}
+
+    {#if payments.length === 0}
+      <div class="empty-state">No payments recorded yet.</div>
+    {:else}
+      {#each payments as pay}
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">{truncId(pay.from_user)} &rarr; {truncId(pay.to_user)}</span>
+            <span class="amount">${fmt(pay.amount)}</span>
+          </div>
+          <div class="exp-meta">
+            {#if pay.status === 'confirmed'}
+              <span class="badge badge-success">confirmed</span>
+            {:else}
+              <span class="badge badge-warning">pending</span>
+            {/if}
+            {#if pay.method}
+              <span class="badge">{pay.method}</span>
+            {/if}
+            {#if pay.created_at}
+              <span class="list-item-subtitle">{formatDate(pay.created_at)}</span>
+            {/if}
+          </div>
+          {#if pay.status === 'pending'}
+            <div class="pay-actions">
+              {#if currentUserId && pay.to_user === currentUserId}
+                <button class="btn btn-sm btn-primary" onclick={() => handleConfirmPayment(pay.id)}>Confirm</button>
+              {/if}
+              <button class="btn btn-sm btn-danger" onclick={() => handleCancelPayment(pay.id)}>Cancel</button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    {/if}
+
+  <!-- ==================== BALANCES TAB ==================== -->
+  {:else if activeTab === 'balances'}
+    {#if balances.length === 0}
+      <div class="empty-state">
+        <p>All settled up!</p>
+        <p style="margin-top: 0.25rem; font-size: 0.85rem;">No outstanding balances.</p>
+      </div>
+    {:else}
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Settlement Recommendations</span>
+        </div>
+        <div class="bal-list">
+          {#each balances as bal}
+            <div class="bal-item">
+              <div class="bal-direction">
+                <span class="uuid-short">{getMemberName(bal.from)}</span>
+                <span class="bal-arrow">&rarr;</span>
+                <span class="uuid-short">{getMemberName(bal.to)}</span>
+              </div>
+              <span class="amount amount-negative">${fmt(bal.amount)}</span>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+  {/if}
+{/if}
+
+<style>
+  .detail-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .detail-header-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .detail-title {
+    font-size: 1.25rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+  }
+
+  .section-actions {
+    margin-bottom: 1rem;
+  }
+
+  .exp-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
+
+  .split-list {
+    border-top: 1px solid var(--border);
+    padding-top: 0.625rem;
+    margin-top: 0.25rem;
+  }
+
+  .split-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.25rem 0;
+    font-size: 0.85rem;
+  }
+
+  .split-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .split-input {
+    width: 120px;
+    flex-shrink: 0;
+  }
+
+  .pay-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+  }
+
+  .bal-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .bal-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .bal-item:last-child {
+    border-bottom: none;
+  }
+
+  .bal-direction {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .bal-arrow {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+  }
+</style>
