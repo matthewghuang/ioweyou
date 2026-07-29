@@ -23,6 +23,12 @@ type MemberInfo struct {
 	UserName string `json:"user_name"`
 }
 
+// Sentinel errors for JoinGroup / CreateGroup flows.
+var (
+	ErrGroupNotFound = fmt.Errorf("group not found")
+	ErrInvalidSecret = fmt.Errorf("invalid secret")
+)
+
 // Context key for authenticated member.
 type contextKey string
 
@@ -147,7 +153,7 @@ func JoinGroup(db *sql.DB, slug, userName, secret string) (memberID, cookieToken
 	// Look up group_id from slug
 	err = db.QueryRow("SELECT group_id FROM group_slugs WHERE slug = ?", slug).Scan(&groupID)
 	if err == sql.ErrNoRows {
-		return "", "", "", fmt.Errorf("group not found")
+		return "", "", "", ErrGroupNotFound
 	}
 	if err != nil {
 		return "", "", "", fmt.Errorf("lookup slug: %w", err)
@@ -159,7 +165,7 @@ func JoinGroup(db *sql.DB, slug, userName, secret string) (memberID, cookieToken
 	if err == nil {
 		// Member exists — verify secret and re-issue token
 		if HashSecret(secret) != existingHash {
-			return "", "", "", fmt.Errorf("invalid secret")
+			return "", "", "", ErrInvalidSecret
 		}
 		cookieToken, err = GenerateToken()
 		if err != nil {
