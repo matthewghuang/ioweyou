@@ -24,6 +24,7 @@
   let expAmt = $state(0);
   let expSplitType = $state('equal');
   let expCustomSplits = $state([]);
+let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
   let expCreating = $state(false);
   let expError = $state('');
 
@@ -347,6 +348,9 @@
                 />
               </div>
             {/each}
+            {#if Math.abs(expCustomSplitsSum - Number(expAmt)) > 0.005}
+              <div class="split-warning">Split amounts sum (${fmt(expCustomSplitsSum)}) ≠ total (${fmt(expAmt)})</div>
+            {/if}
           {/if}
 
           <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;">
@@ -572,6 +576,13 @@
   .split-input {
     width: 120px;
     flex-shrink: 0;
+  }
+
+  .split-warning {
+    color: var(--text-warning, #d97706);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+    font-weight: 500;
   }
 
   .pay-actions {
