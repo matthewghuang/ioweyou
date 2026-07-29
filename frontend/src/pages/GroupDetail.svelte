@@ -324,7 +324,7 @@
             <span class="amount">${fmt(exp.amount)}</span>
           </div>
           <div class="exp-meta">
-            <span class="badge">paid by {truncId(exp.paid_by)}</span>
+            <span class="badge">paid by {getMemberName(exp.paid_by)}</span>
             <span class="badge">{exp.split_type}</span>
             {#if exp.created_at}
               <span class="list-item-subtitle">{formatDate(exp.created_at)}</span>
