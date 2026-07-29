@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -13,14 +14,23 @@ import (
 
 func CreatePayment(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
-		gid := chi.URLParam(r, "id")
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		slug := chi.URLParam(r, "slug")
+		gid, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -40,56 +50,97 @@ func CreatePayment(s *Server) http.HandlerFunc {
 		ts := s.HLC.Now()
 
 		// Store group_id
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "group_id",
-			Value: mustMarshal(gid), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(gid), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "from_user",
-			Value: mustMarshal(body.FromUser), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.FromUser), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "to_user",
-			Value: mustMarshal(body.ToUser), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.ToUser), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "amount",
-			Value: mustMarshal(body.Amount), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.Amount), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "method",
-			Value: mustMarshal(body.Method), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.Method), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "status",
-			Value: mustMarshal("pending"), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal("pending"), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "created_at",
-			Value: mustMarshal(time.Now().UnixNano()), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(time.Now().UnixMilli()), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create payment")
+			return
+		}
 
-		state, _ := s.Store.GetLatestState(docID)
+		state, err := s.Store.GetLatestState(docID)
+		if err != nil {
+			respondError(w, 500, "failed to read state")
+			return
+		}
 		state["id"] = docID
 		respondJSON(w, 201, state)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				s.Broadcaster.Broadcast(gid, ops)
+			}
+		}
 	}
 }
 
 func ListPayments(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
-		gid := chi.URLParam(r, "id")
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		slug := chi.URLParam(r, "slug")
+		gid, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -117,8 +168,16 @@ func ListPayments(s *Server) http.HandlerFunc {
 			if t, ok := state["tombstone"]; ok && t == true {
 				continue
 			}
+			// Skip non-payment docs (expenses also have group_id)
+			if _, ok := state["from_user"]; !ok {
+				continue
+			}
 			state["id"] = docID
 			payments = append(payments, state)
+		}
+		if err := rows.Err(); err != nil {
+			respondError(w, 500, "db error")
+			return
 		}
 		if payments == nil {
 			payments = []map[string]any{}
@@ -130,14 +189,18 @@ func ListPayments(s *Server) http.HandlerFunc {
 func GetPayment(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		docID := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
 		state, err := s.Store.GetLatestState(docID)
-		if err != nil || len(state) == 0 {
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
@@ -147,7 +210,7 @@ func GetPayment(s *Server) http.HandlerFunc {
 		}
 
 		gid, _ := state["group_id"].(string)
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -160,14 +223,18 @@ func GetPayment(s *Server) http.HandlerFunc {
 func ConfirmPayment(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		docID := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
 		state, err := s.Store.GetLatestState(docID)
-		if err != nil || len(state) == 0 {
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
@@ -176,9 +243,15 @@ func ConfirmPayment(s *Server) http.HandlerFunc {
 			return
 		}
 
+		gid, _ := state["group_id"].(string)
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
+			respondError(w, 403, "not a member")
+			return
+		}
+
 		// Only the recipient can confirm
 		toUser, _ := state["to_user"].(string)
-		if toUser != user.ID {
+		if toUser != member.MemberID {
 			respondError(w, 403, "only the recipient can confirm")
 			return
 		}
@@ -190,38 +263,65 @@ func ConfirmPayment(s *Server) http.HandlerFunc {
 		}
 
 		ts := s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "status",
-			Value: mustMarshal("confirmed"), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal("confirmed"), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to confirm payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "confirmed_at",
-			Value: mustMarshal(time.Now().UnixNano()), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(time.Now().UnixMilli()), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to confirm payment")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "confirmed_by",
-			Value: mustMarshal(user.ID), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(member.MemberID), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to confirm payment")
+			return
+		}
 
-		state, _ = s.Store.GetLatestState(docID)
+		state, err = s.Store.GetLatestState(docID)
+		if err != nil {
+			respondError(w, 500, "failed to read state")
+			return
+		}
 		state["id"] = docID
 		respondOK(w, state)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				gid, _ := state["group_id"].(string)
+				if gid != "" {
+					s.Broadcaster.Broadcast(gid, ops)
+				}
+			}
+		}
 	}
 }
 
 func CancelPayment(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		docID := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
 		state, err := s.Store.GetLatestState(docID)
-		if err != nil || len(state) == 0 {
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
@@ -231,16 +331,37 @@ func CancelPayment(s *Server) http.HandlerFunc {
 		}
 
 		gid, _ := state["group_id"].(string)
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
 
-		s.Store.Append(crdt.Operation{
+		// Only the sender or recipient can cancel
+		fromUser, _ := state["from_user"].(string)
+		toUser, _ := state["to_user"].(string)
+		if member.MemberID != fromUser && member.MemberID != toUser {
+			respondError(w, 403, "only the sender or recipient can cancel")
+			return
+		}
+
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "tombstone",
-			Value: mustMarshal(true), AuthorID: user.ID, Timestamp: s.HLC.Now(),
-		})
+			Value: mustMarshal(true), AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+		}); err != nil {
+			respondError(w, 500, "failed to cancel payment")
+			return
+		}
 
 		respondOK(w, nil)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				gid, _ := state["group_id"].(string)
+				if gid != "" {
+					s.Broadcaster.Broadcast(gid, ops)
+				}
+			}
+		}
 	}
 }

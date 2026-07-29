@@ -3,8 +3,8 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -12,193 +12,243 @@ import (
 	"github.com/matthewghuang/ioweyou/internal/crdt"
 )
 
-func mustMarshal(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
-}
-
 func getGroupMembers(db *sql.DB, groupID string) []map[string]string {
-	rows, err := db.Query(`SELECT u.id, u.name FROM group_members gm JOIN users u ON u.id = gm.user_id WHERE gm.group_id = ?`, groupID)
+	rows, err := db.Query(`SELECT member_id, user_name FROM members WHERE group_id = ?`, groupID)
 	if err != nil {
-		return nil
+		return []map[string]string{}
 	}
 	defer rows.Close()
 	var members []map[string]string
 	for rows.Next() {
 		var id, name string
-		if rows.Scan(&id, &name) == nil {
-			members = append(members, map[string]string{"id": id, "name": name})
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
 		}
+		members = append(members, map[string]string{"id": id, "name": name})
+	}
+	if err := rows.Err(); err != nil {
+		return []map[string]string{}
+	}
+	if members == nil {
+		members = []map[string]string{}
 	}
 	return members
 }
 
-func isGroupMember(db *sql.DB, groupID, userID string) bool {
+func isGroupMember(db *sql.DB, groupID, memberID string) bool {
 	var count int
-	db.QueryRow("SELECT COUNT(*) FROM group_members WHERE group_id = ? AND user_id = ?", groupID, userID).Scan(&count)
+	if err := db.QueryRow("SELECT COUNT(*) FROM members WHERE group_id = ? AND member_id = ?", groupID, memberID).Scan(&count); err != nil {
+		return false
+	}
 	return count > 0
 }
 
+// errNotFound is a sentinel for "item not found" in resolveGroup.
+var errNotFound = errors.New("not found")
+
+// resolveGroup checks if identifier is a UUID (direct group_id) or a slug
+// (lookup in group_slugs). Returns the UUID.
+// Returns errNotFound when the identifier is valid but no record exists.
+func resolveGroup(db *sql.DB, identifier string) (string, error) {
+	// Try as UUID first (direct group_id)
+	if uuid.Validate(identifier) == nil {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM group_slugs WHERE group_id = ?", identifier).Scan(&count); err != nil {
+			return "", err
+		}
+		if count > 0 {
+			return identifier, nil
+		}
+		return "", errNotFound
+	}
+
+	// Lookup by slug
+	var groupID string
+	err := db.QueryRow("SELECT group_id FROM group_slugs WHERE slug = ?", identifier).Scan(&groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return groupID, nil
+}
+
+func getGroupInfo(db *sql.DB, store crdt.StateStore, slug string) (map[string]any, error) {
+	groupID, err := resolveGroup(db, slug)
+	if err != nil {
+		return nil, err
+	}
+	state, err := store.GetLatestState(groupID)
+	if err != nil {
+		return nil, err
+	}
+	if len(state) == 0 {
+		return nil, nil
+	}
+	members := getGroupMembers(db, groupID)
+	return map[string]any{
+		"name":         state["name"],
+		"slug":         slug,
+		"internal_id":  groupID,
+		"member_count": len(members),
+		"members":      members,
+	}, nil
+}
+
+// CreateGroup handles POST /api/groups (public, no auth required).
 func CreateGroup(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
-			respondError(w, 401, "unauthorized")
-			return
-		}
-
 		var body struct {
-			Name string `json:"name"`
+			Name        string `json:"name"`
+			CreatorName string `json:"creator_name"`
+			Secret      string `json:"secret"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
-			respondError(w, 400, "name required")
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" || body.CreatorName == "" || body.Secret == "" {
+			respondError(w, 400, "name, creator_name, and secret are required")
 			return
 		}
 
-		docID := uuid.New().String()
-		now := time.Now().UnixNano()
-		ts := s.HLC.Now()
+		slug, memberID, cookieToken, groupID, err := auth.CreateGroup(s.AuthDB, s.Store, s.HLC, body.Name, body.CreatorName, body.Secret)
+		if err != nil {
+			respondError(w, 500, err.Error())
+			return
+		}
 
-		s.Store.Append(crdt.Operation{
-			DocID: docID, OpType: crdt.OpLWW, Field: "name",
-			Value: mustMarshal(body.Name), AuthorID: user.ID, Timestamp: ts,
+		respondJSON(w, 201, map[string]any{
+			"id":           slug,
+			"internal_id":  groupID,
+			"member_id":    memberID,
+			"cookie_token": cookieToken,
 		})
-		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
-			DocID: docID, OpType: crdt.OpLWW, Field: "created_by",
-			Value: mustMarshal(user.ID), AuthorID: user.ID, Timestamp: ts,
-		})
-		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
-			DocID: docID, OpType: crdt.OpLWW, Field: "created_at",
-			Value: mustMarshal(now), AuthorID: user.ID, Timestamp: ts,
-		})
-
-		// Add creator to group_members (non-CRDT)
-		s.AuthDB.Exec("INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)", docID, user.ID)
-
-		state, _ := s.Store.GetLatestState(docID)
-		state["id"] = docID
-		state["members"] = getGroupMembers(s.AuthDB, docID)
-
-		respondJSON(w, 201, state)
 	}
 }
 
-func ListGroups(s *Server) http.HandlerFunc {
+// JoinGroup handles POST /api/groups/join (public, no auth required).
+func JoinGroup(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
-			respondError(w, 401, "unauthorized")
+		var body struct {
+			Slug   string `json:"slug"`
+			Name   string `json:"name"`
+			Secret string `json:"secret"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Slug == "" || body.Name == "" || body.Secret == "" {
+			respondError(w, 400, "slug, name, and secret are required")
 			return
 		}
 
-		rows, err := s.AuthDB.Query("SELECT group_id FROM group_members WHERE user_id = ?", user.ID)
+		memberID, cookieToken, groupID, err := auth.JoinGroup(s.AuthDB, body.Slug, body.Name, body.Secret)
+		if err != nil {
+			if err.Error() == "name already taken in this group" {
+				respondError(w, 409, "name already taken")
+				return
+			}
+			if err.Error() == "group not found" {
+				respondError(w, 404, "group not found")
+				return
+			}
+			respondError(w, 500, err.Error())
+			return
+		}
+
+		state, err := s.Store.GetLatestState(groupID)
+		groupName := ""
+		if err == nil {
+			groupName, _ = state["name"].(string)
+		}
+
+		respondJSON(w, 201, map[string]any{
+			"cookie_token": cookieToken,
+			"member_id":    memberID,
+			"group_name":   groupName,
+			"internal_id":  groupID,
+		})
+	}
+}
+
+// GroupInfo handles GET /api/groups/{slug}/info (public, no auth required).
+func GroupInfo(s *Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		slug := chi.URLParam(r, "slug")
+		info, err := getGroupInfo(s.AuthDB, s.Store, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
 		if err != nil {
 			respondError(w, 500, "db error")
 			return
 		}
-		defer rows.Close()
-
-		var groups []map[string]any
-		for rows.Next() {
-			var gid string
-			if err := rows.Scan(&gid); err != nil {
-				continue
-			}
-			state, err := s.Store.GetLatestState(gid)
-			if err != nil || len(state) == 0 {
-				continue
-			}
-			state["id"] = gid
-			state["members"] = getGroupMembers(s.AuthDB, gid)
-			groups = append(groups, state)
+		if info == nil {
+			respondError(w, 404, "group not found")
+			return
 		}
-		if groups == nil {
-			groups = []map[string]any{}
-		}
-		respondOK(w, groups)
+		respondOK(w, info)
 	}
 }
 
+// GetGroup handles GET /api/groups/{slug} (authenticated).
 func GetGroup(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		gid := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+
+		slug := chi.URLParam(r, "slug")
+		groupID, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+
+		if !isGroupMember(s.AuthDB, groupID, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
 
-		state, err := s.Store.GetLatestState(gid)
-		if err != nil || len(state) == 0 {
+		state, err := s.Store.GetLatestState(groupID)
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
-		state["id"] = gid
-		state["members"] = getGroupMembers(s.AuthDB, gid)
+		state["id"] = slug
+		state["internal_id"] = groupID
+		state["members"] = getGroupMembers(s.AuthDB, groupID)
 		respondOK(w, state)
 	}
 }
 
-// AddMember handles POST /api/groups/{id}/members
-// Adds a user to the group. Only existing group members can add new members.
-func AddMember(s *Server) http.HandlerFunc {
+// UpdateGroup handles PATCH /api/groups/{slug} (authenticated).
+func UpdateGroup(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
-		gid := chi.URLParam(r, "id")
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
-			respondError(w, 403, "not a member")
+		slug := chi.URLParam(r, "slug")
+		groupID, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
 			return
 		}
-
-		var body struct {
-			UserID string `json:"user_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.UserID == "" {
-			respondError(w, 400, "user_id required")
-			return
-		}
-
-		// Verify the user exists
-		var exists int
-		s.AuthDB.QueryRow("SELECT COUNT(*) FROM users WHERE id = ?", body.UserID).Scan(&exists)
-		if exists == 0 {
-			respondError(w, 404, "user not found")
-			return
-		}
-
-		_, err := s.AuthDB.Exec("INSERT OR IGNORE INTO group_members (group_id, user_id) VALUES (?, ?)", gid, body.UserID)
 		if err != nil {
 			respondError(w, 500, "db error")
 			return
 		}
 
-		state, _ := s.Store.GetLatestState(gid)
-		state["id"] = gid
-		state["members"] = getGroupMembers(s.AuthDB, gid)
-		respondJSON(w, 201, state)
-	}
-}
-
-func UpdateGroup(s *Server) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		gid := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
-			respondError(w, 401, "unauthorized")
-			return
-		}
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		if !isGroupMember(s.AuthDB, groupID, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -208,16 +258,36 @@ func UpdateGroup(s *Server) http.HandlerFunc {
 			respondError(w, 400, "invalid body")
 			return
 		}
+		// Only allow updating the group name
+		allowedFields := map[string]bool{"name": true}
 		for k, v := range body {
-			s.Store.Append(crdt.Operation{
-				DocID: gid, OpType: crdt.OpLWW, Field: k,
-				Value: mustMarshal(v), AuthorID: user.ID, Timestamp: s.HLC.Now(),
-			})
+			if !allowedFields[k] {
+				continue
+			}
+			if err := s.Store.Append(crdt.Operation{
+				DocID: groupID, OpType: crdt.OpLWW, Field: k,
+				Value: mustMarshal(v), AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+			}); err != nil {
+				respondError(w, 500, "update failed")
+				return
+			}
 		}
 
-		state, _ := s.Store.GetLatestState(gid)
-		state["id"] = gid
-		state["members"] = getGroupMembers(s.AuthDB, gid)
+		state, err := s.Store.GetLatestState(groupID)
+		if err != nil {
+			respondError(w, 500, "failed to read state")
+			return
+		}
+		state["id"] = slug
+		state["internal_id"] = groupID
+		state["members"] = getGroupMembers(s.AuthDB, groupID)
 		respondOK(w, state)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(groupID, nil); err == nil && len(ops) > 0 {
+				s.Broadcaster.Broadcast(groupID, ops)
+			}
+		}
 	}
 }

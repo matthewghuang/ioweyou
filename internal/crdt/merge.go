@@ -23,6 +23,7 @@ const (
 func MergeState(local, remote []Operation) []Operation {
 	// ---- deduplicate and track origins ----
 	type dedupKey struct {
+		docID    string
 		authorID string
 		wallTime int64
 		logical  uint32
@@ -32,7 +33,7 @@ func MergeState(local, remote []Operation) []Operation {
 
 	var deduped []Operation
 	add := func(op Operation, org opOrigin) {
-		k := dedupKey{authorID: op.AuthorID, wallTime: op.Timestamp.WallTime, logical: op.Timestamp.Logical}
+		k := dedupKey{docID: op.DocID, authorID: op.AuthorID, wallTime: op.Timestamp.WallTime, logical: op.Timestamp.Logical}
 		if _, ok := seen[k]; !ok {
 			seen[k] = struct{}{}
 			opOriginStr[opKey(op)] = org
@@ -182,10 +183,16 @@ func orderRGAList(inserts []Operation) []Operation {
 			// Not found or empty prev — append at end.
 			list = append(list, entry)
 		} else {
-			// Insert right after pos.
+			// Find the correct position: items after prev that have a LOWER timestamp
+			// than this insert should come first (inserts arrive in timestamp order).
+			insPos := pos + 1
+			for insPos < len(list) && compareOpTimestamp(list[insPos].op, ins) < 0 {
+				insPos++
+			}
+			// Insert at insPos.
 			list = append(list, listEntry{})
-			copy(list[pos+2:], list[pos+1:])
-			list[pos+1] = entry
+			copy(list[insPos+1:], list[insPos:])
+			list[insPos] = entry
 		}
 	}
 
@@ -266,12 +273,8 @@ func snapshotDoc(ops []Operation) map[string]any {
 	out := make(map[string]any)
 
 	// Collect LWW ops per field, pick winner.
-	type docField struct {
-		docID string
-		field string
-	}
 	lwwByField := make(map[string][]Operation) // field -> ops
-	rgaByField := make(map[string][]Operation)  // field -> inserts
+	rgaByField := make(map[string][]Operation) // field -> inserts
 
 	for _, op := range ops {
 		switch op.OpType {
@@ -279,10 +282,13 @@ func snapshotDoc(ops []Operation) map[string]any {
 			lwwByField[op.Field] = append(lwwByField[op.Field], op)
 		case OpRGAInsert:
 			rgaByField[op.Field] = append(rgaByField[op.Field], op)
-		case OpRGADelete:
-			// Deletions are absorbed; the surviving inserts carry the data.
 		}
 	}
+
+	// Build a delete set from all RGA deletes in the input (local-only
+	// speculative semantics are not needed in a pure snapshot — every
+	// delete whose timestamp beats its corresponding insert applies).
+	deletedSet := buildDeleteSetFromOps(ops)
 
 	// LWW fields.
 	for field, fops := range lwwByField {
@@ -300,11 +306,18 @@ func snapshotDoc(ops []Operation) map[string]any {
 
 	// RGA fields.
 	for field, inserts := range rgaByField {
-		sort.Slice(inserts, func(i, j int) bool {
-			return compareOpTimestampItem(inserts[i], inserts[j]) < 0
+		// Filter out deleted items.
+		var alive []Operation
+		for _, ins := range inserts {
+			if !deletedSet[ins.ItemID] {
+				alive = append(alive, ins)
+			}
+		}
+		sort.Slice(alive, func(i, j int) bool {
+			return compareOpTimestampItem(alive[i], alive[j]) < 0
 		})
 		// Order by prev_item_id.
-		ordered := orderRGAList(inserts)
+		ordered := orderRGAList(alive)
 		arr := make([]any, 0, len(ordered))
 		for _, ins := range ordered {
 			var v any
@@ -320,7 +333,37 @@ func snapshotDoc(ops []Operation) map[string]any {
 	return out
 }
 
+// buildDeleteSetFromOps returns the set of item_ids that have a delete op
+// whose timestamp is strictly greater than at least one corresponding insert
+// op among the given operations.
+func buildDeleteSetFromOps(ops []Operation) map[string]bool {
+	var inserts []Operation
+	var deletes []Operation
+	for _, op := range ops {
+		switch op.OpType {
+		case OpRGAInsert:
+			inserts = append(inserts, op)
+		case OpRGADelete:
+			deletes = append(deletes, op)
+		}
+	}
+	deleted := make(map[string]bool)
+	for _, ins := range inserts {
+		for _, del := range deletes {
+			if del.ItemID != ins.ItemID {
+				continue
+			}
+			if compareOpTimestamp(del, ins) <= 0 {
+				continue
+			}
+			deleted[ins.ItemID] = true
+			break
+		}
+	}
+	return deleted
+}
+
 // opKey returns the deduplication key for an operation.
 func opKey(op Operation) string {
-	return fmt.Sprintf("%s|%d|%d", op.AuthorID, op.Timestamp.WallTime, op.Timestamp.Logical)
+	return fmt.Sprintf("%s|%s|%d|%d", op.DocID, op.AuthorID, op.Timestamp.WallTime, op.Timestamp.Logical)
 }

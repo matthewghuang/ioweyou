@@ -33,6 +33,7 @@ func (h *HLC) Now() Timestamp {
 	wt := time.Now().UnixNano()
 	if wt > h.wallTime {
 		h.wallTime = wt
+		h.logical = 0
 	}
 	h.logical++
 
@@ -48,7 +49,10 @@ func (h *HLC) Observe(ts Timestamp) {
 	switch {
 	case ts.WallTime > h.wallTime:
 		h.wallTime = ts.WallTime
-		h.logical = ts.Logical + 1
+		if ts.Logical > h.logical {
+			h.logical = ts.Logical
+		}
+		h.logical++
 	case ts.WallTime == h.wallTime:
 		if ts.Logical > h.logical {
 			h.logical = ts.Logical

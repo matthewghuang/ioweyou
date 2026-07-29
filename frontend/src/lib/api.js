@@ -1,33 +1,53 @@
 const BASE = '';
 
-let _apiKey = null;
+// Token storage helpers
+export function setToken(slug, token) {
+  localStorage.setItem('ioweyou_token_' + slug, token);
+}
 
-export function setApiKey(key) {
-  _apiKey = key;
-  if (key) {
-    localStorage.setItem('ioweyou_api_key', key);
-  } else {
-    localStorage.removeItem('ioweyou_api_key');
+export function getToken(slug) {
+  return localStorage.getItem('ioweyou_token_' + slug) || null;
+}
+
+export function clearAllTokens() {
+  const keys = Object.keys(localStorage);
+  for (const key of keys) {
+    if (key.startsWith('ioweyou_token_') || key.startsWith('ioweyou_group_')) {
+      localStorage.removeItem(key);
+    }
   }
 }
 
-export function getApiKey() {
-  if (_apiKey === null) {
-    _apiKey = localStorage.getItem('ioweyou_api_key') || null;
+// Group metadata storage
+export function setGroupInfo(slug, info) {
+  localStorage.setItem('ioweyou_group_' + slug, JSON.stringify(info));
+}
+
+export function getGroupInfo(slug) {
+  const raw = localStorage.getItem('ioweyou_group_' + slug);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+export function getAllGroups() {
+  const keys = Object.keys(localStorage);
+  const groups = [];
+  for (const key of keys) {
+    if (key.startsWith('ioweyou_group_')) {
+      const slug = key.slice('ioweyou_group_'.length);
+      const info = getGroupInfo(slug);
+      if (info) {
+        groups.push({ slug, ...info });
+      }
+    }
   }
-  return _apiKey;
+  return groups;
 }
 
-export function clearApiKey() {
-  _apiKey = null;
-  localStorage.removeItem('ioweyou_api_key');
-}
-
-async function request(method, path, body) {
+async function request(method, path, body, token) {
   const headers = {};
-  const key = getApiKey();
-  if (key) {
-    headers['Authorization'] = `Bearer ${key}`;
+  if (token) {
+    headers['X-Group-Token'] = token;
   }
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -62,8 +82,8 @@ async function request(method, path, body) {
 }
 
 export const api = {
-  get: (path) => request('GET', path),
-  post: (path, body) => request('POST', path, body),
-  patch: (path, body) => request('PATCH', path, body),
-  del: (path) => request('DELETE', path),
+  get: (path, token) => request('GET', path, undefined, token),
+  post: (path, body, token) => request('POST', path, body, token),
+  patch: (path, body, token) => request('PATCH', path, body, token),
+  del: (path, token) => request('DELETE', path, undefined, token),
 };

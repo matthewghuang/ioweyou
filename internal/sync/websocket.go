@@ -19,35 +19,32 @@ var upgrader = websocket.Upgrader{
 }
 
 // WSClient represents a single WebSocket connection with its associated
-// user, store, and broadcast state.
+// member, store, and broadcast state.
 type WSClient struct {
 	conn   *websocket.Conn
 	send   chan []byte
-	user   *auth.User
+	done   chan struct{}
+	member *auth.MemberInfo
 	store  crdt.StateStore
 	authDB *sql.DB
 	hlc    *crdt.HLC
 	bcast  *Broadcaster
 }
 
-// HandleWS is the HTTP handler for WS upgrade at /api/ws?token=<api_key>.
+// HandleWS is the HTTP handler for WS upgrade at /api/ws?token=<cookie_token>.
 // It authenticates via query parameter, upgrades the connection, and starts
 // the read and write pump goroutines.
 func HandleWS(store crdt.StateStore, authDB *sql.DB, hlc *crdt.HLC, bcast *Broadcaster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
 		if token == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "missing token"})
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing token"})
 			return
 		}
 
-		user, err := auth.LookupUserByAPIKey(authDB, token)
-		if err != nil || user == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		member := auth.LookupMemberByToken(authDB, token)
+		if member == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
 
@@ -60,7 +57,8 @@ func HandleWS(store crdt.StateStore, authDB *sql.DB, hlc *crdt.HLC, bcast *Broad
 		c := &WSClient{
 			conn:   conn,
 			send:   make(chan []byte, 256),
-			user:   user,
+			done:   make(chan struct{}),
+			member: member,
 			store:  store,
 			authDB: authDB,
 			hlc:    hlc,
@@ -79,10 +77,20 @@ func HandleWS(store crdt.StateStore, authDB *sql.DB, hlc *crdt.HLC, bcast *Broad
 //	{"type":"push","operations":[...]}
 func (c *WSClient) readPump() {
 	defer func() {
-		c.bcast.Unsubscribe(c.conn)
+		if c.bcast != nil {
+			c.bcast.Unsubscribe(c.send)
+		}
+		close(c.done)
 		c.conn.Close()
 	}()
 
+	c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	outer:
 	for {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
@@ -93,9 +101,9 @@ func (c *WSClient) readPump() {
 		}
 
 		var msg struct {
-			Type       string            `json:"type"`
-			GroupID    string            `json:"group_id,omitempty"`
-			Operations []crdt.Operation  `json:"operations,omitempty"`
+			Type       string           `json:"type"`
+			GroupID    string           `json:"group_id,omitempty"`
+			Operations []crdt.Operation `json:"operations,omitempty"`
 		}
 		if err := json.Unmarshal(message, &msg); err != nil {
 			continue
@@ -103,7 +111,13 @@ func (c *WSClient) readPump() {
 
 		switch msg.Type {
 		case "subscribe":
-			c.bcast.Subscribe(msg.GroupID, c.conn)
+			// Verify membership before subscribing to a group
+			var count int
+			if err := c.authDB.QueryRow("SELECT COUNT(*) FROM members WHERE group_id = ? AND member_id = ?", msg.GroupID, c.member.MemberID).Scan(&count); err != nil || count == 0 {
+				log.Printf("ws subscribe auth: member %s not authorized for group %s", c.member.MemberID, msg.GroupID)
+				continue
+			}
+			c.bcast.Subscribe(msg.GroupID, c.send)
 
 		case "push":
 			// Advance HLC for causality tracking
@@ -111,17 +125,53 @@ func (c *WSClient) readPump() {
 				c.hlc.Observe(op.Timestamp)
 			}
 
+			// Verify group membership before inserting.
+			groupSet := make(map[string]bool)
+			for _, op := range msg.Operations {
+				if op.OpType == crdt.OpLWW && op.Field == "name" {
+					groupSet[op.DocID] = true
+				}
+				if op.OpType == crdt.OpLWW && op.Field == "group_id" {
+					var gid string
+					if err := json.Unmarshal(op.Value, &gid); err == nil && gid != "" {
+						groupSet[gid] = true
+					}
+				}
+			}
+			for _, op := range msg.Operations {
+				if !groupSet[op.DocID] {
+					if gid := resolveDocGroup(c.authDB, op.DocID); gid != "" {
+						groupSet[gid] = true
+					}
+				}
+			}
+			if len(groupSet) == 0 {
+				log.Printf("ws push auth: could not determine group for operations")
+				continue
+			}
+
+			for gid := range groupSet {
+				var count int
+				if err := c.authDB.QueryRow("SELECT COUNT(*) FROM members WHERE group_id = ? AND member_id = ?", gid, c.member.MemberID).Scan(&count); err != nil || count == 0 {
+					log.Printf("ws push auth: member %s not authorized for group %s", c.member.MemberID, gid)
+					continue outer
+				}
+			}
+
 			// Persist operations
 			for _, op := range msg.Operations {
 				if err := c.store.Append(op); err != nil {
 					log.Printf("append op error: %v", err)
+					continue
 				}
 			}
 
 			// Broadcast to subscribers of relevant groups
-			groups := resolveDocGroups(msg.Operations, c.store)
-			for _, gid := range groups {
-				c.bcast.Broadcast(gid, msg.Operations)
+			if c.bcast != nil {
+				groups := resolveDocGroups(msg.Operations, c.store)
+				for _, gid := range groups {
+					c.bcast.Broadcast(gid, msg.Operations)
+				}
 			}
 		}
 	}
@@ -154,6 +204,9 @@ func (c *WSClient) writePump() {
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
+
+		case <-c.done:
+			return
 		}
 	}
 }
@@ -162,6 +215,7 @@ func (c *WSClient) writePump() {
 // for the given operations by inspecting each document's projected state.
 func resolveDocGroups(ops []crdt.Operation, store crdt.StateStore) []string {
 	seen := make(map[string]bool)
+	seenGroups := make(map[string]bool)
 	var groups []string
 
 	for _, op := range ops {
@@ -178,13 +232,19 @@ func resolveDocGroups(ops []crdt.Operation, store crdt.StateStore) []string {
 		// If the doc itself looks like a group document (has a "name" field),
 		// use its doc_id as the broadcast group.
 		if _, ok := state["name"]; ok {
-			groups = append(groups, op.DocID)
+			if !seenGroups[op.DocID] {
+				seenGroups[op.DocID] = true
+				groups = append(groups, op.DocID)
+			}
 			continue
 		}
 
 		// If the doc has a "group_id" field, broadcast to that group.
 		if gid, ok := state["group_id"].(string); ok && gid != "" {
-			groups = append(groups, gid)
+			if !seenGroups[gid] {
+				seenGroups[gid] = true
+				groups = append(groups, gid)
+			}
 		}
 	}
 

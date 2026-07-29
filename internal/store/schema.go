@@ -14,27 +14,24 @@ CREATE TABLE IF NOT EXISTS crdt_operations (
     author_id   TEXT NOT NULL,
     wall_time   INTEGER NOT NULL,
     logical     INTEGER NOT NULL,
-    UNIQUE(author_id, wall_time, logical)
+    UNIQUE(doc_id, author_id, wall_time, logical)
 );
 CREATE INDEX IF NOT EXISTS idx_ops_doc ON crdt_operations(doc_id);
 CREATE INDEX IF NOT EXISTS idx_ops_author ON crdt_operations(author_id, wall_time, logical);
-CREATE TABLE IF NOT EXISTS users (
-    id       TEXT PRIMARY KEY,
-    name     TEXT NOT NULL,
-    api_key  TEXT NOT NULL UNIQUE
+CREATE TABLE IF NOT EXISTS group_slugs (
+    slug     TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL UNIQUE
 );
-CREATE TABLE IF NOT EXISTS group_members (
-    group_id TEXT NOT NULL,
-    user_id  TEXT NOT NULL,
-    PRIMARY KEY (group_id, user_id)
+
+CREATE TABLE IF NOT EXISTS members (
+    member_id    TEXT PRIMARY KEY,
+    group_id     TEXT NOT NULL,
+    user_name    TEXT NOT NULL,
+    secret_hash  TEXT NOT NULL,
+    cookie_token TEXT NOT NULL UNIQUE,
+    UNIQUE(group_id, user_name)
 );
-CREATE TABLE IF NOT EXISTS sync_cursors (
-    client_id      TEXT NOT NULL,
-    author_id      TEXT NOT NULL,
-    last_wall_time INTEGER NOT NULL DEFAULT 0,
-    last_logical   INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (client_id, author_id)
-);
+
 `
 
 func InitSchema(db *sql.DB) error {

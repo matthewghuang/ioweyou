@@ -15,19 +15,10 @@ type SQLiteStateStore struct {
 }
 
 func NewSQLiteStateStore(dbPath string) (*SQLiteStateStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
-	}
-	// Enable WAL mode and foreign keys
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA foreign_keys=ON",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("pragma: %w", err)
-		}
 	}
 	if err := InitSchema(db); err != nil {
 		db.Close()
@@ -111,14 +102,16 @@ func (s *SQLiteStateStore) GetLatestState(docID string) (map[string]any, error) 
 	if err != nil {
 		return nil, err
 	}
-	return crdt.Snapshot(ops), nil
+	merged := crdt.MergeState(ops, nil)
+	return crdt.Snapshot(merged), nil
 }
 
 func (s *SQLiteStateStore) GetVersionVector(docID string) (map[string]crdt.Timestamp, error) {
 	rows, err := s.db.Query(
-		`SELECT author_id, MAX(wall_time), MAX(logical)
-		 FROM crdt_operations WHERE doc_id = ?
-		 GROUP BY author_id`, docID)
+		`SELECT author_id, wall_time, logical FROM crdt_operations
+		 WHERE doc_id = ?
+		 AND (wall_time > 0 OR logical > 0)
+		 ORDER BY wall_time DESC, logical DESC`, docID)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +124,13 @@ func (s *SQLiteStateStore) GetVersionVector(docID string) (map[string]crdt.Times
 		if err := rows.Scan(&authorID, &ts.WallTime, &ts.Logical); err != nil {
 			return nil, err
 		}
-		vv[authorID] = ts
+		// Only take the first (highest timestamp) per author
+		if _, exists := vv[authorID]; !exists {
+			vv[authorID] = ts
+		}
 	}
-	return vv, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return vv, nil
 }

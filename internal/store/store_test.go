@@ -41,7 +41,10 @@ func TestAppendAndGetOps(t *testing.T) {
 }
 
 func TestAppendDedup(t *testing.T) {
-	s, _ := NewSQLiteStateStore(":memory:")
+	s, err := NewSQLiteStateStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
 	op := crdt.Operation{
@@ -56,26 +59,36 @@ func TestAppendDedup(t *testing.T) {
 	if err := s.Append(op); err != nil {
 		t.Fatal(err)
 	}
-	ops, _ := s.GetOps("doc1", nil)
+	ops, err := s.GetOps("doc1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ops) != 1 {
 		t.Fatalf("expected 1 op after dedup, got %d", len(ops))
 	}
 }
 
 func TestGetLatestStateLWW(t *testing.T) {
-	s, _ := NewSQLiteStateStore(":memory:")
+	s, err := NewSQLiteStateStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
-	s.Append(crdt.Operation{
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpLWW, Field: "color",
 		Value: json.RawMessage(`"red"`), AuthorID: "alice",
 		Timestamp: crdt.Timestamp{WallTime: 1, Logical: 1},
-	})
-	s.Append(crdt.Operation{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpLWW, Field: "color",
 		Value: json.RawMessage(`"blue"`), AuthorID: "bob",
 		Timestamp: crdt.Timestamp{WallTime: 2, Logical: 1},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	state, err := s.GetLatestState("doc1")
 	if err != nil {
@@ -87,21 +100,31 @@ func TestGetLatestStateLWW(t *testing.T) {
 }
 
 func TestGetLatestStateRGA(t *testing.T) {
-	s, _ := NewSQLiteStateStore(":memory:")
+	s, err := NewSQLiteStateStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
-	s.Append(crdt.Operation{
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpRGAInsert, Field: "items",
 		ItemID: "i1", Value: json.RawMessage(`{"text":"A"}`),
 		AuthorID: "alice", Timestamp: crdt.Timestamp{WallTime: 1, Logical: 1},
-	})
-	s.Append(crdt.Operation{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpRGAInsert, Field: "items",
 		ItemID: "i2", PrevItemID: "i1", Value: json.RawMessage(`{"text":"B"}`),
 		AuthorID: "alice", Timestamp: crdt.Timestamp{WallTime: 2, Logical: 1},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	state, _ := s.GetLatestState("doc1")
+	state, err := s.GetLatestState("doc1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	items, ok := state["items"].([]any)
 	if !ok || len(items) != 2 {
 		t.Fatalf("expected 2 items, got %v", state["items"])
@@ -109,16 +132,24 @@ func TestGetLatestStateRGA(t *testing.T) {
 }
 
 func TestGetVersionVector(t *testing.T) {
-	s, _ := NewSQLiteStateStore(":memory:")
+	s, err := NewSQLiteStateStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
-	s.Append(crdt.Operation{
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpLWW, Field: "x",
 		Value: json.RawMessage(`"1"`), AuthorID: "alice",
 		Timestamp: crdt.Timestamp{WallTime: 5, Logical: 3},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	vv, _ := s.GetVersionVector("doc1")
+	vv, err := s.GetVersionVector("doc1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	ts, ok := vv["alice"]
 	if !ok {
 		t.Fatal("missing alice in version vector")
@@ -129,22 +160,32 @@ func TestGetVersionVector(t *testing.T) {
 }
 
 func TestGetOpsSince(t *testing.T) {
-	s, _ := NewSQLiteStateStore(":memory:")
+	s, err := NewSQLiteStateStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 
-	s.Append(crdt.Operation{
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpLWW, Field: "a",
 		Value: json.RawMessage(`"1"`), AuthorID: "alice",
 		Timestamp: crdt.Timestamp{WallTime: 1, Logical: 1},
-	})
-	s.Append(crdt.Operation{
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Append(crdt.Operation{
 		DocID: "doc1", OpType: crdt.OpLWW, Field: "b",
 		Value: json.RawMessage(`"2"`), AuthorID: "alice",
 		Timestamp: crdt.Timestamp{WallTime: 2, Logical: 1},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	since := map[string]crdt.Timestamp{"alice": {WallTime: 1, Logical: 1}}
-	ops, _ := s.GetOps("doc1", since)
+	ops, err := s.GetOps("doc1", since)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(ops) != 1 {
 		t.Fatalf("expected 1 op after cursor, got %d", len(ops))
 	}

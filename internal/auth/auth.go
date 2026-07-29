@@ -3,30 +3,39 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/matthewghuang/ioweyou/internal/crdt"
 )
 
-// User represents a registered user.
-type User struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	APIKey string `json:"api_key,omitempty"`
+// MemberInfo represents an authenticated group member (injected into context).
+type MemberInfo struct {
+	MemberID string `json:"member_id"`
+	GroupID  string `json:"group_id"`
+	UserName string `json:"user_name"`
 }
 
-// Context key for authenticated user.
+// Context key for authenticated member.
 type contextKey string
 
-const UserContextKey contextKey = "user"
+const MemberContextKey contextKey = "member"
 
-// GenerateAPIKey creates a 32-byte random hex string.
-func GenerateAPIKey() (string, error) {
+// HashSecret returns SHA-256 hex of the secret.
+func HashSecret(secret string) string {
+	h := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(h[:])
+}
+
+// GenerateToken creates a 32-byte random hex string (replaces GenerateAPIKey).
+func GenerateToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
@@ -34,134 +43,217 @@ func GenerateAPIKey() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// RegisterUser inserts a new user into the users table. Returns the created User.
-func RegisterUser(db *sql.DB, name string) (*User, error) {
-	id := uuid.New().String()
-	apiKey, err := GenerateAPIKey()
-	if err != nil {
-		return nil, err
+// GenerateSlug creates a human-readable slug from a group name.
+// Lowercases, replaces spaces with hyphens, strips non-alnum, appends 4 random hex chars.
+func GenerateSlug(name string) (string, error) {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		} else if r == ' ' || r == '-' {
+			b.WriteRune('-')
+		}
 	}
-
-	_, err = db.Exec("INSERT INTO users (id, name, api_key) VALUES (?, ?, ?)", id, name, apiKey)
-	if err != nil {
-		return nil, err
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "group"
 	}
-
-	return &User{ID: id, Name: name, APIKey: apiKey}, nil
+	randSuffix := make([]byte, 2) // 4 hex chars
+	if _, err := rand.Read(randSuffix); err != nil {
+		return "", fmt.Errorf("rand: %w", err)
+	}
+	return fmt.Sprintf("%s-%x", slug, randSuffix), nil
 }
 
-// LookupUserByAPIKey queries the users table by api_key. Returns nil if not found.
-func LookupUserByAPIKey(db *sql.DB, apiKey string) (*User, error) {
-	row := db.QueryRow("SELECT id, name, api_key FROM users WHERE api_key = ?", apiKey)
-
-	var u User
-	err := row.Scan(&u.ID, &u.Name, &u.APIKey)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+// CreateGroup creates group slug, group CRDT doc, and creator member entry.
+// CRDT appends happen first (append-only, harmless if orphaned), then
+// relational DB inserts are wrapped in a transaction for atomicity.
+// Returns (slug, memberID, cookieToken, groupID, error).
+func CreateGroup(db *sql.DB, store crdt.StateStore, hlc *crdt.HLC, groupName, creatorName, secret string) (slug, memberID, cookieToken, groupID string, err error) {
+	groupID = uuid.New().String()
+	slug, err = GenerateSlug(groupName)
 	if err != nil {
-		return nil, err
+		return "", "", "", "", fmt.Errorf("generate slug: %w", err)
 	}
 
-	return &u, nil
+	// Generate member UUID first so it can be used as AuthorID in CRDT ops
+	memberID = uuid.New().String()
+
+	// Create group CRDT doc with member as author (before the DB transaction;
+	// these are append-only and harmless if orphaned by a later rollback).
+	ts := hlc.Now()
+	if err := store.Append(crdt.Operation{
+		DocID: groupID, OpType: crdt.OpLWW, Field: "name",
+		Value: mustMarshal(groupName), AuthorID: memberID, Timestamp: ts,
+	}); err != nil {
+		return "", "", "", "", fmt.Errorf("store append: %w", err)
+	}
+	ts = hlc.Now()
+	if err := store.Append(crdt.Operation{
+		DocID: groupID, OpType: crdt.OpLWW, Field: "created_by",
+		Value: mustMarshal(creatorName), AuthorID: memberID, Timestamp: ts,
+	}); err != nil {
+		return "", "", "", "", fmt.Errorf("store append: %w", err)
+	}
+	ts = hlc.Now()
+	if err := store.Append(crdt.Operation{
+		DocID: groupID, OpType: crdt.OpLWW, Field: "created_at",
+		Value: mustMarshal(ts.WallTime / 1e6), AuthorID: memberID, Timestamp: ts,
+	}); err != nil {
+		return "", "", "", "", fmt.Errorf("store append: %w", err)
+	}
+
+	// Prepare relational data
+	secretHash := HashSecret(secret)
+	cookieToken, err = GenerateToken()
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("generate token: %w", err)
+	}
+
+	// Wrap slug + member inserts in a SQL transaction for atomicity.
+	tx, err := db.Begin()
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec("INSERT INTO group_slugs (slug, group_id) VALUES (?, ?)", slug, groupID); err != nil {
+		return "", "", "", "", fmt.Errorf("insert slug: %w", err)
+	}
+
+	if _, err = tx.Exec(
+		"INSERT INTO members (member_id, group_id, user_name, secret_hash, cookie_token) VALUES (?, ?, ?, ?, ?)",
+		memberID, groupID, creatorName, secretHash, cookieToken,
+	); err != nil {
+		return "", "", "", "", fmt.Errorf("insert member: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", "", "", "", fmt.Errorf("commit tx: %w", err)
+	}
+
+	return slug, memberID, cookieToken, groupID, nil
 }
 
-// AuthMiddleware returns an HTTP middleware that extracts the Bearer token from
-// the Authorization header, looks up the user, and injects the User into the request context.
-// On failure, returns 401.
+// JoinGroup adds a new member to an existing group by slug.
+// Returns (memberID, cookieToken, groupID, error).
+func JoinGroup(db *sql.DB, slug, userName, secret string) (memberID, cookieToken, groupID string, err error) {
+	// Look up group_id from slug
+	err = db.QueryRow("SELECT group_id FROM group_slugs WHERE slug = ?", slug).Scan(&groupID)
+	if err == sql.ErrNoRows {
+		return "", "", "", fmt.Errorf("group not found")
+	}
+	if err != nil {
+		return "", "", "", fmt.Errorf("lookup slug: %w", err)
+	}
+
+	// Verify the secret matches the group's shared secret (first member's secret_hash)
+	var existingHash string
+	if err := db.QueryRow("SELECT secret_hash FROM members WHERE group_id = ? LIMIT 1", groupID).Scan(&existingHash); err != nil {
+		return "", "", "", fmt.Errorf("cannot verify group secret: %w", err)
+	}
+	if HashSecret(secret) != existingHash {
+		return "", "", "", fmt.Errorf("invalid secret")
+	}
+
+	// Check for duplicate user_name in group
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM members WHERE group_id = ? AND user_name = ?", groupID, userName).Scan(&count); err != nil {
+		return "", "", "", fmt.Errorf("duplicate check: %w", err)
+	}
+	if count > 0 {
+		return "", "", "", fmt.Errorf("name already taken in this group")
+	}
+
+	memberID = uuid.New().String()
+	secretHash := HashSecret(secret)
+	cookieToken, err = GenerateToken()
+	if err != nil {
+		return "", "", "", fmt.Errorf("generate token: %w", err)
+	}
+
+	// Wrap member insert in a transaction.
+	tx, err := db.Begin()
+	if err != nil {
+		return "", "", "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(
+		"INSERT INTO members (member_id, group_id, user_name, secret_hash, cookie_token) VALUES (?, ?, ?, ?, ?)",
+		memberID, groupID, userName, secretHash, cookieToken,
+	); err != nil {
+		return "", "", "", fmt.Errorf("insert member: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return "", "", "", fmt.Errorf("commit tx: %w", err)
+	}
+
+	return memberID, cookieToken, groupID, nil
+}
+
+// LookupMemberByToken looks up a member by cookie_token.
+// Returns MemberInfo or nil.
+func LookupMemberByToken(db *sql.DB, token string) *MemberInfo {
+	row := db.QueryRow("SELECT member_id, group_id, user_name FROM members WHERE cookie_token = ?", token)
+	var m MemberInfo
+	err := row.Scan(&m.MemberID, &m.GroupID, &m.UserName)
+	if err != nil {
+		return nil
+	}
+	return &m
+}
+
+// AuthMiddleware extracts X-Group-Token header, looks up member, injects MemberInfo into context.
+// On failure returns 401.
 func AuthMiddleware(db *sql.DB) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			auth := r.Header.Get("Authorization")
-			if !strings.HasPrefix(auth, "Bearer ") {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			token := r.Header.Get("X-Group-Token")
+			if token == "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 				return
 			}
 
-			token := strings.TrimPrefix(auth, "Bearer ")
-			user, err := LookupUserByAPIKey(db, token)
-			if err != nil || user == nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusUnauthorized)
-				json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			member := LookupMemberByToken(db, token)
+			if member == nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), UserContextKey, user)
+			ctx := context.WithValue(r.Context(), MemberContextKey, member)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-// UserFromContext extracts the User from a request context.
-func UserFromContext(ctx context.Context) *User {
-	user, _ := ctx.Value(UserContextKey).(*User)
-	return user
+// MemberFromContext extracts MemberInfo from request context.
+func MemberFromContext(ctx context.Context) *MemberInfo {
+	member, _ := ctx.Value(MemberContextKey).(*MemberInfo)
+	return member
 }
 
-// RegisterHandler handles POST /api/auth/register
-// Request body: {"name": "Alice"}
-// Response: {"id": "...", "name": "Alice", "api_key": "..."}
-// WhoamiHandler handles GET /api/auth/whoami
-// Returns the current authenticated user's id and name.
-func WhoamiHandler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		user := UserFromContext(r.Context())
-		if user == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"id":   user.ID,
-			"name": user.Name,
-		})
+func mustMarshal(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic("mustMarshal: " + err.Error())
 	}
+	return b
 }
 
-// RegisterHandler handles POST /api/auth/register
-// Request body: {"name": "Alice"}
-// Response: {"id": "...", "name": "Alice", "api_key": "..."}
-func RegisterHandler(db *sql.DB) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed"})
-			return
-		}
-
-		var body struct {
-			Name string `json:"name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
-			return
-		}
-
-		if body.Name == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "name is required"})
-			return
-		}
-
-		user, err := RegisterUser(db, body.Name)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "failed to register user"})
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(user)
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// client connection gone — nothing to do
 	}
 }

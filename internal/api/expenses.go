@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -19,14 +20,23 @@ type SplitInput struct {
 
 func CreateExpense(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
-		gid := chi.URLParam(r, "id")
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		slug := chi.URLParam(r, "slug")
+		gid, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -49,35 +59,53 @@ func CreateExpense(s *Server) http.HandlerFunc {
 		ts := s.HLC.Now()
 
 		// LWW fields
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "group_id",
-			Value: mustMarshal(gid), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(gid), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create expense")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "description",
-			Value: mustMarshal(body.Description), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.Description), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create expense")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "amount",
-			Value: mustMarshal(body.Amount), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.Amount), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create expense")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "paid_by",
-			Value: mustMarshal(user.ID), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(member.MemberID), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create expense")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "split_type",
-			Value: mustMarshal(body.SplitType), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(body.SplitType), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create expense")
+			return
+		}
 		ts = s.HLC.Now()
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "created_at",
-			Value: mustMarshal(time.Now().UnixNano()), AuthorID: user.ID, Timestamp: ts,
-		})
+			Value: mustMarshal(time.Now().UnixMilli()), AuthorID: member.MemberID, Timestamp: ts,
+		}); err != nil {
+			respondError(w, 500, "failed to create expense")
+			return
+		}
 
 		// RGA inserts for splits
 		var prevItemID string
@@ -85,12 +113,15 @@ func CreateExpense(s *Server) http.HandlerFunc {
 			for _, sp := range body.Splits {
 				ts = s.HLC.Now()
 				itemID := uuid.New().String()
-				spVal, _ := json.Marshal(sp)
-				s.Store.Append(crdt.Operation{
+				spVal := mustMarshal(sp)
+				if err := s.Store.Append(crdt.Operation{
 					DocID: docID, OpType: crdt.OpRGAInsert, Field: "splits",
 					Value: spVal, ItemID: itemID, PrevItemID: prevItemID,
-					AuthorID: user.ID, Timestamp: ts,
-				})
+					AuthorID: member.MemberID, Timestamp: ts,
+				}); err != nil {
+					respondError(w, 500, "failed to create expense")
+					return
+				}
 				prevItemID = itemID
 			}
 		} else {
@@ -104,31 +135,54 @@ func CreateExpense(s *Server) http.HandlerFunc {
 			for _, m := range members {
 				ts = s.HLC.Now()
 				itemID := uuid.New().String()
-				spVal, _ := json.Marshal(SplitInput{UserID: m["id"], Amount: splitAmt})
-				s.Store.Append(crdt.Operation{
+				spVal := mustMarshal(SplitInput{UserID: m["id"], Amount: splitAmt})
+				if err := s.Store.Append(crdt.Operation{
 					DocID: docID, OpType: crdt.OpRGAInsert, Field: "splits",
 					Value: spVal, ItemID: itemID, PrevItemID: prevItemID,
-					AuthorID: user.ID, Timestamp: ts,
-				})
+					AuthorID: member.MemberID, Timestamp: ts,
+				}); err != nil {
+					respondError(w, 500, "failed to create expense")
+					return
+				}
 				prevItemID = itemID
 			}
 		}
 
-		state, _ := s.Store.GetLatestState(docID)
+		state, err := s.Store.GetLatestState(docID)
+		if err != nil {
+			respondError(w, 500, "failed to read state")
+			return
+		}
 		state["id"] = docID
 		respondJSON(w, 201, state)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				s.Broadcaster.Broadcast(gid, ops)
+			}
+		}
 	}
 }
 
 func ListExpenses(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
-		gid := chi.URLParam(r, "id")
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		slug := chi.URLParam(r, "slug")
+		gid, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -154,12 +208,20 @@ func ListExpenses(s *Server) http.HandlerFunc {
 			if err != nil || len(state) == 0 {
 				continue
 			}
+			// Skip non-expense docs (payments also have group_id)
+			if _, ok := state["description"]; !ok {
+				continue
+			}
 			// Skip tombstoned expenses
 			if t, ok := state["tombstone"]; ok && t == true {
 				continue
 			}
 			state["id"] = docID
 			expenses = append(expenses, state)
+		}
+		if err := rows.Err(); err != nil {
+			respondError(w, 500, "db error")
+			return
 		}
 		if expenses == nil {
 			expenses = []map[string]any{}
@@ -171,14 +233,18 @@ func ListExpenses(s *Server) http.HandlerFunc {
 func GetExpense(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		docID := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
 		state, err := s.Store.GetLatestState(docID)
-		if err != nil || len(state) == 0 {
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
@@ -188,7 +254,7 @@ func GetExpense(s *Server) http.HandlerFunc {
 		}
 
 		gid, _ := state["group_id"].(string)
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -201,14 +267,18 @@ func GetExpense(s *Server) http.HandlerFunc {
 func UpdateExpense(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		docID := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
 		state, err := s.Store.GetLatestState(docID)
-		if err != nil || len(state) == 0 {
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
@@ -218,7 +288,7 @@ func UpdateExpense(s *Server) http.HandlerFunc {
 		}
 
 		gid, _ := state["group_id"].(string)
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
@@ -229,15 +299,23 @@ func UpdateExpense(s *Server) http.HandlerFunc {
 			return
 		}
 
-		// Handle LWW field updates
+		// Handle LWW field updates (whitelist only mutable expense fields)
+		allowedFields := map[string]bool{
+			"description": true,
+			"amount":      true,
+			"split_type":  true,
+		}
 		for k, v := range body {
-			if k == "splits" {
-				continue // handled below
+			if !allowedFields[k] {
+				continue
 			}
-			s.Store.Append(crdt.Operation{
+			if err := s.Store.Append(crdt.Operation{
 				DocID: docID, OpType: crdt.OpLWW, Field: k,
-				Value: mustMarshal(v), AuthorID: user.ID, Timestamp: s.HLC.Now(),
-			})
+				Value: mustMarshal(v), AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+			}); err != nil {
+				respondError(w, 500, "failed to update expense")
+				return
+			}
 		}
 
 		// Handle split replacement via RGA delete + insert
@@ -249,14 +327,21 @@ func UpdateExpense(s *Server) http.HandlerFunc {
 			}
 
 			// Delete existing splits
-			existingOps, _ := s.Store.GetOps(docID, nil)
+			existingOps, err := s.Store.GetOps(docID, nil)
+			if err != nil {
+				respondError(w, 500, "failed to fetch existing ops")
+				return
+			}
 			for _, op := range existingOps {
 				if op.OpType == crdt.OpRGAInsert && op.Field == "splits" {
-					s.Store.Append(crdt.Operation{
+					if err := s.Store.Append(crdt.Operation{
 						DocID: docID, OpType: crdt.OpRGADelete, Field: "splits",
 						Value: mustMarshal(op.ItemID), ItemID: op.ItemID,
-						AuthorID: user.ID, Timestamp: s.HLC.Now(),
-					})
+						AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+					}); err != nil {
+						respondError(w, 500, "failed to update expense")
+						return
+					}
 				}
 			}
 
@@ -268,33 +353,54 @@ func UpdateExpense(s *Server) http.HandlerFunc {
 					continue
 				}
 				itemID := uuid.New().String()
-				spVal, _ := json.Marshal(spMap)
-				s.Store.Append(crdt.Operation{
+				spVal := mustMarshal(spMap)
+				if err := s.Store.Append(crdt.Operation{
 					DocID: docID, OpType: crdt.OpRGAInsert, Field: "splits",
 					Value: spVal, ItemID: itemID, PrevItemID: prevItemID,
-					AuthorID: user.ID, Timestamp: s.HLC.Now(),
-				})
+					AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+				}); err != nil {
+					respondError(w, 500, "failed to update expense")
+					return
+				}
 				prevItemID = itemID
 			}
 		}
 
-		state, _ = s.Store.GetLatestState(docID)
+		state, err = s.Store.GetLatestState(docID)
+		if err != nil {
+			respondError(w, 500, "failed to read state")
+			return
+		}
 		state["id"] = docID
 		respondOK(w, state)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				gid, _ := state["group_id"].(string)
+				if gid != "" {
+					s.Broadcaster.Broadcast(gid, ops)
+				}
+			}
+		}
 	}
 }
 
 func DeleteExpense(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		docID := chi.URLParam(r, "id")
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
 
 		state, err := s.Store.GetLatestState(docID)
-		if err != nil || len(state) == 0 {
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
 			respondError(w, 404, "not found")
 			return
 		}
@@ -304,16 +410,29 @@ func DeleteExpense(s *Server) http.HandlerFunc {
 		}
 
 		gid, _ := state["group_id"].(string)
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
 
-		s.Store.Append(crdt.Operation{
+		if err := s.Store.Append(crdt.Operation{
 			DocID: docID, OpType: crdt.OpLWW, Field: "tombstone",
-			Value: mustMarshal(true), AuthorID: user.ID, Timestamp: s.HLC.Now(),
-		})
+			Value: mustMarshal(true), AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+		}); err != nil {
+			respondError(w, 500, "failed to delete expense")
+			return
+		}
 
 		respondOK(w, nil)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				gid, _ := state["group_id"].(string)
+				if gid != "" {
+					s.Broadcaster.Broadcast(gid, ops)
+				}
+			}
+		}
 	}
 }

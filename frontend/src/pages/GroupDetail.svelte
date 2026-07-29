@@ -1,12 +1,12 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
-  import { currentGroupId, currentUser } from '../lib/stores.js';
-  import { api } from '../lib/api.js';
-  import { subscribe, setOnUpdate } from '../lib/websocket.js';
+  import { currentGroupSlug } from '../lib/stores.js';
+  import { api, getToken, getGroupInfo } from '../lib/api.js';
+  import { connect, subscribe, setOnUpdate, disconnect as wsDisconnect } from '../lib/websocket.js';
+  import ShareModal from '../lib/ShareModal.svelte';
 
   let { onBack } = $props();
 
-  let groupId = $derived($currentGroupId);
+  let slug = $derived($currentGroupSlug);
   let group = $state(null);
   let members = $state([]);
   let expenses = $state([]);
@@ -15,6 +15,8 @@
   let loading = $state(true);
   let error = $state('');
   let activeTab = $state('expenses');
+  let showShare = $state(false);
+  let inviteLink = $derived(slug ? `${window.location.origin}/join/${slug}` : '');
 
   // Expense form
   let showExpForm = $state(false);
@@ -34,40 +36,8 @@
   let payCreating = $state(false);
   let payError = $state('');
 
-  let currentUserId = $state(null);
-
-  // Add member state
-  let showAddMember = $state(false);
-  let memberSearch = $state('');
-  let searchResults = $state([]);
-  let searchingMembers = $state(false);
-
-  async function handleSearchUsers() {
-    if (!memberSearch.trim()) {
-      searchResults = [];
-      return;
-    }
-    searchingMembers = true;
-    try {
-      searchResults = await api.get('/api/users?q=' + encodeURIComponent(memberSearch.trim()));
-    } catch {
-      searchResults = [];
-    } finally {
-      searchingMembers = false;
-    }
-  }
-
-  async function handleAddMember(uid) {
-    try {
-      await api.post('/api/groups/' + groupId + '/members', { user_id: uid });
-      memberSearch = '';
-      searchResults = [];
-      showAddMember = false;
-      await loadAll();
-    } catch (e) {
-      alert('Failed to add member: ' + e.message);
-    }
-  }
+  let currentMemberId = $state(null);
+  let loadGen = 0;
 
   // ---- Helpers ----
 
@@ -77,7 +47,7 @@
 
   function formatDate(ts) {
     if (!ts) return '';
-    const d = new Date(Math.floor(Number(ts) / 1e6));
+    const d = new Date(Number(ts));
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
       ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   }
@@ -89,25 +59,38 @@
   // ---- Data loading ----
 
   async function loadAll() {
-    if (!groupId) return;
+    if (!slug) return;
     error = '';
     loading = true;
+    const token = getToken(slug);
+    if (!token) {
+      error = 'Not authenticated for this group';
+      loading = false;
+      return;
+    }
+    const gen = ++loadGen;
     try {
       const [g, exps, pays, bals] = await Promise.all([
-        api.get(`/api/groups/${groupId}`),
-        api.get(`/api/groups/${groupId}/expenses`),
-        api.get(`/api/groups/${groupId}/payments`),
-        api.get(`/api/groups/${groupId}/balances`),
+        api.get(`/api/groups/${slug}`, token),
+        api.get(`/api/groups/${slug}/expenses`, token),
+        api.get(`/api/groups/${slug}/payments`, token),
+        api.get(`/api/groups/${slug}/balances`, token),
       ]);
+      if (gen !== loadGen) return; // stale response, ignore
       group = g;
       members = g.members || [];
       expenses = exps;
       payments = pays;
       balances = bals;
+      // If user selected custom split before members loaded, populate now
+      if (expSplitType === 'custom') {
+        handleSplitTypeChange();
+      }
     } catch (e) {
+      if (gen !== loadGen) return; // stale error
       error = e.message;
     } finally {
-      loading = false;
+      if (gen === loadGen) loading = false;
     }
   }
 
@@ -123,7 +106,8 @@
   }
 
   function handleSplitTypeChange() {
-    if (expSplitType === 'custom' && members.length > 0) {
+    if (expSplitType === 'custom') {
+      if (members.length === 0) return; // members not loaded yet; loadAll will populate
       const existing = new Map(expCustomSplits.map(s => [s.user_id, s.amount]));
       expCustomSplits = members.map(m => ({
         user_id: m.id,
@@ -136,6 +120,7 @@
     e.preventDefault();
     expError = '';
     expCreating = true;
+    const token = getToken(slug);
     try {
       const body = {
         description: expDesc,
@@ -147,11 +132,11 @@
           .filter(s => s.amount > 0)
           .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
       }
-      await api.post(`/api/groups/${groupId}/expenses`, body);
+      await api.post(`/api/groups/${slug}/expenses`, body, token);
       resetExpForm();
       const [exps, bals] = await Promise.all([
-        api.get(`/api/groups/${groupId}/expenses`),
-        api.get(`/api/groups/${groupId}/balances`),
+        api.get(`/api/groups/${slug}/expenses`, token),
+        api.get(`/api/groups/${slug}/balances`, token),
       ]);
       expenses = exps;
       balances = bals;
@@ -165,7 +150,7 @@
   // ---- Payment form ----
 
   function resetPayForm() {
-    payFrom = currentUserId || '';
+    payFrom = currentMemberId || '';
     payTo = '';
     payAmt = 0;
     payMethod = '';
@@ -177,17 +162,18 @@
     e.preventDefault();
     payError = '';
     payCreating = true;
+    const token = getToken(slug);
     try {
-      await api.post(`/api/groups/${groupId}/payments`, {
+      await api.post(`/api/groups/${slug}/payments`, {
         from_user: payFrom,
         to_user: payTo,
         amount: parseFloat(payAmt),
         method: payMethod || undefined,
-      });
+      }, token);
       resetPayForm();
       const [pays, bals] = await Promise.all([
-        api.get(`/api/groups/${groupId}/payments`),
-        api.get(`/api/groups/${groupId}/balances`),
+        api.get(`/api/groups/${slug}/payments`, token),
+        api.get(`/api/groups/${slug}/balances`, token),
       ]);
       payments = pays;
       balances = bals;
@@ -201,11 +187,12 @@
   // ---- Payment actions ----
 
   async function handleConfirmPayment(payId) {
+    const token = getToken(slug);
     try {
-      await api.post(`/api/payments/${payId}/confirm`);
+      await api.post(`/api/payments/${payId}/confirm`, undefined, token);
       const [pays, bals] = await Promise.all([
-        api.get(`/api/groups/${groupId}/payments`),
-        api.get(`/api/groups/${groupId}/balances`),
+        api.get(`/api/groups/${slug}/payments`, token),
+        api.get(`/api/groups/${slug}/balances`, token),
       ]);
       payments = pays;
       balances = bals;
@@ -216,11 +203,12 @@
 
   async function handleCancelPayment(payId) {
     if (!confirm('Cancel this payment?')) return;
+    const token = getToken(slug);
     try {
-      await api.del(`/api/payments/${payId}`);
+      await api.del(`/api/payments/${payId}`, token);
       const [pays, bals] = await Promise.all([
-        api.get(`/api/groups/${groupId}/payments`),
-        api.get(`/api/groups/${groupId}/balances`),
+        api.get(`/api/groups/${slug}/payments`, token),
+        api.get(`/api/groups/${slug}/balances`, token),
       ]);
       payments = pays;
       balances = bals;
@@ -239,27 +227,35 @@
 
   // ---- Init ----
 
-  function getCurrentUserId() {
-    try {
-      const stored = localStorage.getItem('ioweyou_user');
-      if (stored) return JSON.parse(stored).id;
-    } catch {}
-    return null;
+  function loadFromLocal() {
+    const info = getGroupInfo(slug);
+    if (info) {
+      currentMemberId = info.member_id || null;
+    }
   }
 
-  onMount(() => {
-    currentUserId = getCurrentUserId();
+  $effect(() => {
+    const s = slug;
+    if (!s) return;
+
+    loadFromLocal();
     loadAll();
-    // Subscribe to real-time updates for this group
-    if (groupId) subscribe(groupId);
+    connect(s);
+    const info = getGroupInfo(s);
+    if (info && info.internal_id) {
+      subscribe(info.internal_id);
+    }
     setOnUpdate(() => {
       loadAll();
     });
+
+    return () => {
+      loadGen++;
+      setOnUpdate(null);
+      wsDisconnect();
+    };
   });
 
-  onDestroy(() => {
-    setOnUpdate(null);
-  });
 </script>
 
 {#if loading}
@@ -276,32 +272,11 @@
         {#each members as m}
           <span class="member-chip" title={m.id}>{m.name}</span>
         {/each}
-        <button class="btn btn-sm" onclick={() => showAddMember = !showAddMember}>
-          {showAddMember ? 'Cancel' : '+ Invite'}
-        </button>
       </div>
-      {#if showAddMember}
-        <div class="add-member-row">
-          <input class="form-input add-member-input" type="text" placeholder="Search users by name..." bind:value={memberSearch} oninput={handleSearchUsers} />
-          {#if searchingMembers}
-            <span class="spinner" style="display:inline-block;width:1rem;height:1rem;margin-left:0.5rem;"></span>
-          {/if}
-          {#if searchResults.length > 0}
-            <div class="search-results">
-              {#each searchResults as u}
-                <button class="search-result-item" onclick={() => handleAddMember(u.id)}>
-                  {u.name}
-                </button>
-              {/each}
-            </div>
-          {:else if memberSearch.trim() && !searchingMembers}
-            <div class="search-results">
-              <div class="search-result-item hint">No users found</div>
-            </div>
-          {/if}
-        </div>
-      {/if}
     </div>
+    <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link">
+      Share
+    </button>
   </div>
 
   <!-- Tabs -->
@@ -487,7 +462,7 @@
           </div>
           {#if pay.status === 'pending'}
             <div class="pay-actions">
-              {#if currentUserId && pay.to_user === currentUserId}
+              {#if currentMemberId && pay.to_user === currentMemberId}
                 <button class="btn btn-sm btn-primary" onclick={() => handleConfirmPayment(pay.id)}>Confirm</button>
               {/if}
               <button class="btn btn-sm btn-danger" onclick={() => handleCancelPayment(pay.id)}>Cancel</button>
@@ -524,6 +499,10 @@
       </div>
     {/if}
   {/if}
+{/if}
+
+{#if showShare && inviteLink}
+  <ShareModal link={inviteLink} onClose={() => showShare = false} />
 {/if}
 
 <style>
@@ -617,54 +596,5 @@
   .bal-arrow {
     color: var(--text-muted);
     font-size: 1.1rem;
-  }
-
-  .add-member-row {
-    margin-top: 0.75rem;
-    position: relative;
-  }
-
-  .add-member-input {
-    width: 100%;
-    max-width: 320px;
-  }
-
-  .search-results {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    max-height: 200px;
-    overflow-y: auto;
-    z-index: 10;
-    min-width: 200px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  }
-
-  .search-result-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 0.5rem 0.75rem;
-    border: none;
-    background: none;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: 0.9rem;
-  }
-
-  .search-result-item:hover {
-    background: var(--hover);
-  }
-
-  .search-result-item.hint {
-    color: var(--text-muted);
-    cursor: default;
-  }
-
-  .search-result-item.hint:hover {
-    background: none;
   }
 </style>

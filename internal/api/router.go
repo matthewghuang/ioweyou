@@ -33,7 +33,7 @@ func NewRouter(s *Server) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Group-Token")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(204)
 				return
@@ -42,47 +42,41 @@ func NewRouter(s *Server) http.Handler {
 		})
 	})
 
-	// Public routes
-	r.Post("/api/auth/register", auth.RegisterHandler(s.AuthDB))
+	// Public routes (no auth required)
+	r.Post("/api/groups", CreateGroup(s))
+	r.Post("/api/groups/join", JoinGroup(s))
+	r.Get("/api/groups/{slug}/info", GroupInfo(s))
 
-	// Authenticated routes
+	// WebSocket (auth via query param, handled inside)
+	r.Get("/api/ws", sync.HandleWS(s.Store, s.AuthDB, s.HLC, s.Broadcaster))
+
+	// Authenticated routes (require X-Group-Token)
 	r.Group(func(r chi.Router) {
 		r.Use(auth.AuthMiddleware(s.AuthDB))
 
-		// Whoami
-		r.Get("/api/auth/whoami", auth.WhoamiHandler())
-
-		// Users
-		r.Get("/api/users", ListUsers(s))
-
-		// Groups
-		r.Post("/api/groups", CreateGroup(s))
-		r.Get("/api/groups", ListGroups(s))
-		r.Get("/api/groups/{id}", GetGroup(s))
-		r.Patch("/api/groups/{id}", UpdateGroup(s))
-		r.Post("/api/groups/{id}/members", AddMember(s))
+		r.Get("/api/groups/{slug}", GetGroup(s))
+		r.Patch("/api/groups/{slug}", UpdateGroup(s))
 
 		// Expenses
-		r.Post("/api/groups/{id}/expenses", CreateExpense(s))
-		r.Get("/api/groups/{id}/expenses", ListExpenses(s))
+		r.Post("/api/groups/{slug}/expenses", CreateExpense(s))
+		r.Get("/api/groups/{slug}/expenses", ListExpenses(s))
 		r.Get("/api/expenses/{id}", GetExpense(s))
 		r.Patch("/api/expenses/{id}", UpdateExpense(s))
 		r.Delete("/api/expenses/{id}", DeleteExpense(s))
 
 		// Payments
-		r.Post("/api/groups/{id}/payments", CreatePayment(s))
-		r.Get("/api/groups/{id}/payments", ListPayments(s))
+		r.Post("/api/groups/{slug}/payments", CreatePayment(s))
+		r.Get("/api/groups/{slug}/payments", ListPayments(s))
 		r.Get("/api/payments/{id}", GetPayment(s))
 		r.Post("/api/payments/{id}/confirm", ConfirmPayment(s))
 		r.Delete("/api/payments/{id}", CancelPayment(s))
 
 		// Balances
-		r.Get("/api/groups/{id}/balances", GetBalances(s))
+		r.Get("/api/groups/{slug}/balances", GetBalances(s))
 
 		// Sync
 		r.Post("/api/sync/pull", sync.HandlePull(s.AuthDB))
 		r.Post("/api/sync/push", sync.HandlePush(s.AuthDB, s.HLC, s.Broadcaster))
-		r.Get("/api/ws", sync.HandleWS(s.Store, s.AuthDB, s.HLC, s.Broadcaster))
 	})
 
 	return r

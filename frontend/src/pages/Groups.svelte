@@ -1,51 +1,30 @@
 <script>
   import { onMount } from 'svelte';
-  import { api } from '../lib/api.js';
+  import { getAllGroups, getToken } from '../lib/api.js';
+  import { currentGroupSlug } from '../lib/stores.js';
+  import ShareModal from '../lib/ShareModal.svelte';
 
   let { onSelectGroup } = $props();
 
   let groups = $state([]);
-  let loading = $state(true);
-  let error = $state('');
+  let showShare = $state(false);
+  let shareLink = $state('');
 
-  let showCreate = $state(false);
-  let newGroupName = $state('');
-  let creating = $state(false);
-  let createError = $state('');
+  function loadGroups() {
+    groups = getAllGroups();
+  }
 
-  async function loadGroups() {
-    error = '';
-    loading = true;
-    try {
-      groups = await api.get('/api/groups');
-    } catch (e) {
-      error = e.message;
-    } finally {
-      loading = false;
+  function selectGroup(slug) {
+    const token = getToken(slug);
+    if (token) {
+      currentGroupSlug.set(slug);
+      onSelectGroup(slug);
     }
   }
 
-  async function handleCreate(e) {
-    e.preventDefault();
-    createError = '';
-    creating = true;
-    try {
-      await api.post('/api/groups', { name: newGroupName });
-      newGroupName = '';
-      showCreate = false;
-      await loadGroups();
-    } catch (e) {
-      createError = e.message;
-    } finally {
-      creating = false;
-    }
-  }
-
-  function formatDate(ts) {
-    if (!ts) return '';
-    const ns = Number(ts);
-    const d = new Date(Math.floor(ns / 1e6));
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  function openShare(slug) {
+    shareLink = `${window.location.origin}/join/${slug}`;
+    showShare = true;
   }
 
   onMount(loadGroups);
@@ -53,64 +32,35 @@
 
 <div class="page-header">
   <h2 class="page-title">Your Groups</h2>
-  <button class="btn btn-primary" onclick={() => showCreate = !showCreate}>
-    {showCreate ? 'Cancel' : '+ New Group'}
-  </button>
+  <a href="/" class="btn btn-primary">+ New Group</a>
 </div>
 
-{#if showCreate}
-  <div class="form-section">
-    <div class="form-section-title">Create Group</div>
-    {#if createError}
-      <div class="alert alert-error">{createError}</div>
-    {/if}
-    <form onsubmit={handleCreate}>
-      <div class="form-group">
-        <label class="form-label" for="grp-name">Group name</label>
-        <input
-          id="grp-name"
-          class="form-input"
-          type="text"
-          placeholder="e.g. Ski Trip 2025"
-          bind:value={newGroupName}
-          required
-          disabled={creating}
-        />
-      </div>
-      <button class="btn btn-primary" type="submit" disabled={creating}>
-        {creating ? 'Creating…' : 'Create'}
-      </button>
-    </form>
-  </div>
-{/if}
-
-{#if loading}
-  <div class="empty-state"><span class="spinner"></span> Loading groups…</div>
-{:else if error}
-  <div class="alert alert-error">{error}</div>
-  <button class="btn" onclick={loadGroups}>Retry</button>
-{:else if groups.length === 0}
+{#if groups.length === 0}
   <div class="empty-state">
     <p>You're not in any groups yet.</p>
-    <p style="margin-top: 0.5rem;">Create one to get started!</p>
+    <p style="margin-top: 0.5rem;"><a href="/" class="btn btn-primary">Create one to get started!</a></p>
   </div>
 {:else}
   <div class="group-list">
     {#each groups as group}
-      <button class="group-card card" onclick={() => onSelectGroup(group.id)}>
-        <div class="group-card-main">
+      <div class="group-card card">
+        <div class="group-card-main" onclick={() => selectGroup(group.slug)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && selectGroup(group.slug)}>
           <div class="group-card-name">{group.name}</div>
           <div class="group-card-meta">
-            <span class="badge">{group.members?.length || 0} member{(group.members?.length || 0) !== 1 ? 's' : ''}</span>
-            {#if group.created_at}
-              <span class="group-card-date">Created {formatDate(group.created_at)}</span>
-            {/if}
+            <span class="badge">Signed in as {group.member_name}</span>
           </div>
         </div>
-        <div class="group-card-arrow">&rarr;</div>
-      </button>
+        <div class="group-card-actions">
+          <button class="btn btn-sm share-btn" onclick={() => openShare(group.slug)} title="Share invite link">Share</button>
+          <span class="group-card-arrow" onclick={() => selectGroup(group.slug)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && selectGroup(group.slug)}>&rarr;</span>
+        </div>
+      </div>
     {/each}
   </div>
+{/if}
+
+{#if showShare && shareLink}
+  <ShareModal link={shareLink} onClose={() => showShare = false} />
 {/if}
 
 <style>
@@ -136,11 +86,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
-    text-align: left;
     width: 100%;
     border: 1px solid var(--border);
+    padding: 0.75rem 1rem;
   }
 
   .group-card:hover {
@@ -151,6 +100,19 @@
   .group-card-main {
     flex: 1;
     min-width: 0;
+    cursor: pointer;
+    padding: 0;
+    background: none;
+    border: none;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+  }
+
+  .group-card-main:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 
   .group-card-name {
@@ -167,13 +129,27 @@
     color: var(--text-secondary);
   }
 
-  .group-card-date {
+  .group-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .share-btn {
     font-size: 0.8rem;
   }
 
   .group-card-arrow {
     font-size: 1.2rem;
     color: var(--text-muted);
-    margin-left: 0.75rem;
+    cursor: pointer;
+    padding: 0.25rem;
+  }
+
+  .group-card-arrow:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 </style>

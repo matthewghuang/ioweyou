@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"math"
 	"net/http"
 	"sort"
@@ -18,18 +19,28 @@ type BalanceEntry struct {
 
 func GetBalances(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user := auth.UserFromContext(r.Context())
-		if user == nil {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
 			respondError(w, 401, "unauthorized")
 			return
 		}
-		gid := chi.URLParam(r, "id")
-		if !isGroupMember(s.AuthDB, gid, user.ID) {
+
+		slug := chi.URLParam(r, "slug")
+		gid, err := resolveGroup(s.AuthDB, slug)
+		if errors.Is(err, errNotFound) {
+			respondError(w, 404, "group not found")
+			return
+		}
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
 			respondError(w, 403, "not a member")
 			return
 		}
 
-		// Collect all expense doc_ids for this group
+		// Collect all doc_ids for this group
 		rows, err := s.AuthDB.Query(
 			"SELECT DISTINCT doc_id FROM crdt_operations WHERE op_type = 'lww' AND field = 'group_id' AND value = ?",
 			string(mustMarshal(gid)),
@@ -38,21 +49,24 @@ func GetBalances(s *Server) http.HandlerFunc {
 			respondError(w, 500, "db error")
 			return
 		}
+		defer rows.Close()
 
 		// net balance per user: positive = should receive, negative = should pay
 		balances := make(map[string]float64)
 
-		// --- Process expenses ---
-		var expenseIDs []string
+		var docIDs []string
 		for rows.Next() {
 			var docID string
 			if rows.Scan(&docID) == nil {
-				expenseIDs = append(expenseIDs, docID)
+				docIDs = append(docIDs, docID)
 			}
 		}
-		rows.Close()
+		if err := rows.Err(); err != nil {
+			respondError(w, 500, "rows error")
+			return
+		}
 
-		for _, docID := range expenseIDs {
+		for _, docID := range docIDs {
 			state, err := s.Store.GetLatestState(docID)
 			if err != nil || len(state) == 0 {
 				continue
@@ -61,68 +75,41 @@ func GetBalances(s *Server) http.HandlerFunc {
 				continue
 			}
 
+			// Process as expense if it has paid_by and splits
 			paidBy, _ := state["paid_by"].(string)
 			amount, _ := state["amount"].(float64)
-			if paidBy == "" || amount <= 0 {
-				continue
+			if paidBy != "" && amount > 0 {
+				// Payer is owed the total amount
+				balances[paidBy] += amount
+
+				// Subtract each participant's share
+				splits, _ := state["splits"].([]any)
+				for _, sp := range splits {
+					split, ok := sp.(map[string]any)
+					if !ok {
+						continue
+					}
+					uid, _ := split["user_id"].(string)
+					splitAmt, _ := split["amount"].(float64)
+					if uid == "" {
+						continue
+					}
+					balances[uid] -= splitAmt
+				}
 			}
 
-			// Payer is owed the total amount
-			balances[paidBy] += amount
-
-			// Subtract each participant's share
-			splits, _ := state["splits"].([]any)
-			for _, sp := range splits {
-				split, ok := sp.(map[string]any)
-				if !ok {
-					continue
-				}
-				uid, _ := split["user_id"].(string)
-				splitAmt, _ := split["amount"].(float64)
-				if uid == "" {
-					continue
-				}
-				balances[uid] -= splitAmt
-			}
-		}
-
-		// --- Process confirmed payments ---
-		payRows, err := s.AuthDB.Query(
-			"SELECT DISTINCT doc_id FROM crdt_operations WHERE op_type = 'lww' AND field = 'group_id' AND value = ?",
-			string(mustMarshal(gid)),
-		)
-		if err == nil {
-			var paymentIDs []string
-			for payRows.Next() {
-				var docID string
-				if payRows.Scan(&docID) == nil {
-					paymentIDs = append(paymentIDs, docID)
-				}
-			}
-			payRows.Close()
-
-			for _, docID := range paymentIDs {
-				state, err := s.Store.GetLatestState(docID)
-				if err != nil || len(state) == 0 {
-					continue
-				}
-				if t, ok := state["tombstone"]; ok && t == true {
-					continue
-				}
-				status, _ := state["status"].(string)
-				if status != "confirmed" {
-					continue
-				}
-
+			// Process as confirmed payment if it has from_user, to_user, and status confirmed
+			status, _ := state["status"].(string)
+			if status == "confirmed" {
 				fromUser, _ := state["from_user"].(string)
 				toUser, _ := state["to_user"].(string)
 				amt, _ := state["amount"].(float64)
-				if fromUser == "" || toUser == "" {
-					continue
+				if fromUser != "" && toUser != "" && amt > 0 {
+					// fromUser paid toUser, so fromUser's net balance increases
+					// (reduces their debt) and toUser's net balance decreases.
+					balances[fromUser] += amt
+					balances[toUser] -= amt
 				}
-
-				balances[fromUser] += amt
-				balances[toUser] -= amt
 			}
 		}
 

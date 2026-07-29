@@ -4,39 +4,40 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/gorilla/websocket"
 	"github.com/matthewghuang/ioweyou/internal/crdt"
 )
 
 // Broadcaster manages WebSocket subscriptions by group_id.
+// Messages are sent to each subscriber's send channel, which the
+// WebSocket write pump reads from — this avoids concurrent writes
+// to a single websocket.Conn.
 type Broadcaster struct {
 	mu   sync.RWMutex
-	subs map[string]map[*websocket.Conn]bool // group_id -> set of connections
+	subs map[string]map[chan []byte]bool // group_id -> set of send channels
 }
 
 // NewBroadcaster creates a new Broadcaster.
 func NewBroadcaster() *Broadcaster {
-	return &Broadcaster{subs: make(map[string]map[*websocket.Conn]bool)}
+	return &Broadcaster{subs: make(map[string]map[chan []byte]bool)}
 }
 
-// Subscribe adds a connection to a group's broadcast list.
-func (b *Broadcaster) Subscribe(groupID string, conn *websocket.Conn) {
+// Subscribe registers a send channel to receive broadcasts for a group.
+func (b *Broadcaster) Subscribe(groupID string, sendCh chan []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.subs[groupID] == nil {
-		b.subs[groupID] = make(map[*websocket.Conn]bool)
+		b.subs[groupID] = make(map[chan []byte]bool)
 	}
-	b.subs[groupID][conn] = true
+	b.subs[groupID][sendCh] = true
 }
 
-// Unsubscribe removes a connection from all groups. If a group becomes empty,
-// the group key is deleted from the map.
-func (b *Broadcaster) Unsubscribe(conn *websocket.Conn) {
+// Unsubscribe removes a send channel from all groups.
+func (b *Broadcaster) Unsubscribe(sendCh chan []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for gid, conns := range b.subs {
-		delete(conns, conn)
-		if len(conns) == 0 {
+	for gid, chs := range b.subs {
+		delete(chs, sendCh)
+		if len(chs) == 0 {
 			delete(b.subs, gid)
 		}
 	}
@@ -44,14 +45,14 @@ func (b *Broadcaster) Unsubscribe(conn *websocket.Conn) {
 
 // Broadcast sends an operation change notification to all subscribers of a group.
 // The message is {"type":"change","operations":[...]}.
-// Each connection is written to in a separate goroutine to avoid blocking. On
-// write error the connection is unsubscribed and closed.
+// Messages are sent to each subscriber's send channel (non-blocking). The
+// receiver's write pump is responsible for writing to the WebSocket connection.
 func (b *Broadcaster) Broadcast(groupID string, ops []crdt.Operation) {
 	b.mu.RLock()
-	conns := b.subs[groupID]
-	b.mu.RUnlock()
+	defer b.mu.RUnlock()
+	chs := b.subs[groupID]
 
-	if len(conns) == 0 {
+	if len(chs) == 0 {
 		return
 	}
 
@@ -63,12 +64,11 @@ func (b *Broadcaster) Broadcast(groupID string, ops []crdt.Operation) {
 		return
 	}
 
-	for conn := range conns {
-		go func(c *websocket.Conn) {
-			if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
-				b.Unsubscribe(c)
-				c.Close()
-			}
-		}(conn)
+	for ch := range chs {
+		select {
+		case ch <- msg:
+		default:
+			// Channel full — subscriber is too slow, drop message
+		}
 	}
 }

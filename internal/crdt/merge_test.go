@@ -2,10 +2,7 @@ package crdt
 
 import (
 	"encoding/json"
-	"sort"
-	"strings"
 	"testing"
-	"time"
 )
 
 // helpers ----------------------------------------------------------------
@@ -541,9 +538,3 @@ func TestOperationJSONRoundTrip(t *testing.T) {
 		t.Fatal("timestamp round-trip mismatch")
 	}
 }
-
-// go test vet helper —
-// silence unused import warning for 'sort' and 'strings' used in helpers
-var _ = sort.Strings
-var _ = strings.Compare
-var _ = time.Now

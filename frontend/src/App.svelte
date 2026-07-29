@@ -1,83 +1,114 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { currentPage, currentUser, currentGroupId } from './lib/stores.js';
-  import { api, getApiKey, setApiKey, clearApiKey } from './lib/api.js';
-  import { connect, disconnect } from './lib/websocket.js';
+  import { currentPage, currentGroupSlug } from './lib/stores.js';
+  import { clearAllTokens, getAllGroups, getToken } from './lib/api.js';
+  import { disconnect, unsubscribe } from './lib/websocket.js';
 
-  import Register from './pages/Register.svelte';
-  import Login from './pages/Login.svelte';
+  import Landing from './pages/Landing.svelte';
+  import Join from './pages/Join.svelte';
   import Groups from './pages/Groups.svelte';
   import GroupDetail from './pages/GroupDetail.svelte';
 
   let loading = $state(true);
 
-  onDestroy(() => {
-    disconnect();
-  });
-
   onMount(async () => {
-    const key = getApiKey();
-    if (key) {
-      try {
-        await api.get('/api/groups');
-        const stored = localStorage.getItem('ioweyou_user');
-        if (stored) {
-          currentUser.set(JSON.parse(stored));
-        }
-        connect();
-        currentPage.set('groups');
-      } catch {
-        clearApiKey();
-        localStorage.removeItem('ioweyou_user');
-        currentPage.set('login');
+    window.addEventListener('popstate', handlePopState);
+
+    // Check URL path for initial page
+    const path = window.location.pathname;
+    const joinMatch = path.match(/^\/join\/(.+)/);
+    if (joinMatch) {
+      currentPage.set('join');
+      loading = false;
+      return;
+    }
+    if (path === '/join') {
+      currentPage.set('join');
+      loading = false;
+      return;
+    }
+
+    // Handle direct deep-link to a group
+    const groupsMatch = path.match(/^\/groups\/(.+)/);
+    if (groupsMatch) {
+      const slug = decodeURIComponent(groupsMatch[1]);
+      const token = getToken(slug);
+      if (token) {
+        currentGroupSlug.set(slug);
+        currentPage.set('group');
+        loading = false;
+        return;
       }
+    }
+
+    // Check localStorage for saved groups
+    const groups = getAllGroups();
+    if (groups.length > 0) {
+      currentPage.set('groups');
     } else {
-      currentPage.set('login');
+      currentPage.set('landing');
     }
     loading = false;
   });
 
+  onDestroy(() => {
+    disconnect();
+    window.removeEventListener('popstate', handlePopState);
+  });
+
+  // Handle browser back/forward
+  function handlePopState() {
+    const path = window.location.pathname;
+    if (path === '/groups') {
+      currentPage.set('groups');
+      currentGroupSlug.set(null);
+    } else if (path.startsWith('/groups/')) {
+      const slug = path.slice('/groups/'.length);
+      currentGroupSlug.set(slug);
+      currentPage.set('group');
+    } else if (path === '/join' || path.startsWith('/join/')) {
+      currentPage.set('join');
+      currentGroupSlug.set(null);
+    } else {
+      currentPage.set('landing');
+      currentGroupSlug.set(null);
+    }
+  }
+
   function handleLogout() {
     disconnect();
-    clearApiKey();
-    localStorage.removeItem('ioweyou_user');
-    currentUser.set(null);
-    currentGroupId.set(null);
-    currentPage.set('login');
+    clearAllTokens();
+    currentGroupSlug.set(null);
+    history.pushState(null, '', '/');
+    currentPage.set('landing');
   }
 
-  function handleRegister(user) {
-    setApiKey(user.api_key);
-    localStorage.setItem('ioweyou_user', JSON.stringify({ id: user.id, name: user.name }));
-    currentUser.set({ id: user.id, name: user.name });
-    connect();
+  function handleCreateGroup() {
+    history.pushState(null, '', '/groups');
     currentPage.set('groups');
   }
 
-  function handleLogin(user) {
-    setApiKey(user.api_key);
-    localStorage.setItem('ioweyou_user', JSON.stringify({ id: user.id, name: user.name }));
-    currentUser.set({ id: user.id, name: user.name });
-    connect();
+  function handleJoinGroup() {
+    history.pushState(null, '', '/groups');
     currentPage.set('groups');
   }
 
-  function handleSelectGroup(id) {
-    currentGroupId.set(id);
+  function handleSelectGroup(slug) {
+    currentGroupSlug.set(slug);
+    history.pushState(null, '', `/groups/${slug}`);
     currentPage.set('group');
   }
 
   function handleBackToGroups() {
-    import('./lib/websocket.js').then(m => m.unsubscribe());
+    unsubscribe();
+    currentGroupSlug.set(null);
+    history.pushState(null, '', '/groups');
     currentPage.set('groups');
   }
 
-  function handleRegisterClick() {
-    currentPage.set('register');
-  }
-
-  function handleLoginClick() {
-    currentPage.set('login');
+  function handleGoHome() {
+    history.pushState(null, '', '/');
+    currentPage.set('landing');
   }
 </script>
 
@@ -86,24 +117,21 @@
     <div class="spinner"></div>
   </div>
 {:else}
-  {#if $currentPage !== 'login' && $currentPage !== 'register'}
+  {#if $currentPage !== 'landing' && $currentPage !== 'join'}
     <header class="header">
       <div class="container header-inner">
-        <div class="header-title">I Owe You</div>
+        <button class="header-title-btn" onclick={handleGoHome}>I Owe You</button>
         <div class="header-right">
-          {#if $currentUser}
-            <span class="header-user">{$currentUser.name}</span>
-          {/if}
           <button class="btn btn-sm" onclick={handleLogout}>Logout</button>
         </div>
       </div>
     </header>
   {/if}
   <main class="container">
-    {#if $currentPage === 'register'}
-      <Register onRegister={handleRegister} onLoginClick={handleLoginClick} />
-    {:else if $currentPage === 'login'}
-      <Login onLogin={handleLogin} onRegisterClick={handleRegisterClick} />
+    {#if $currentPage === 'landing'}
+      <Landing onCreate={handleCreateGroup} />
+    {:else if $currentPage === 'join'}
+      <Join onJoin={handleJoinGroup} />
     {:else if $currentPage === 'groups'}
       <Groups onSelectGroup={handleSelectGroup} />
     {:else if $currentPage === 'group'}
@@ -124,5 +152,19 @@
     display: flex;
     align-items: center;
     gap: 0.75rem;
+  }
+
+  .header-title-btn {
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .header-title-btn:hover {
+    color: var(--accent);
   }
 </style>
