@@ -484,7 +484,7 @@ DELETE /api/payments/{id}
 
 ## 5. Balances
 
-Computes net balances from all non-deleted expenses and confirmed payments in a group, then produces a minimal set of settlement recommendations.
+Computes net balances from all non-deleted expenses and confirmed payments in a group, then produces recommended transfers with a per-expense breakdown.
 
 ### 5.1 Get Balances
 
@@ -496,22 +496,37 @@ GET /api/groups/{id}/balances
 
 ```json
 [
-  { "from": "user-a-uuid", "to": "user-c-uuid", "amount": 25.00 },
-  { "from": "user-b-uuid", "to": "user-c-uuid", "amount": 15.50 }
+  {
+    "from": "user-a-uuid",
+    "to": "user-c-uuid",
+    "amount": 25.00,
+    "breakdown": [
+      { "expense_name": "Dinner", "amount": 25.00 }
+    ]
+  },
+  {
+    "from": "user-b-uuid",
+    "to": "user-c-uuid",
+    "amount": 15.50,
+    "breakdown": [
+      { "expense_name": "Dinner", "amount": 15.50 }
+    ]
+  }
 ]
 ```
 
 **Behaviour:**
 1. **Expenses:** For each non-tombstoned expense, the payer is credited the full amount, and each participant is debited their split amount.
 2. **Payments:** For each confirmed (non-tombstoned) payment, `from_user` is credited and `to_user` is debited (reducing the debt).
-3. **Settlement computation:** Debtors and creditors are sorted alphabetically and a greedy algorithm pairs them, producing the minimal number of recommended transfers.
-4. Amounts are rounded to 2 decimal places.
-5. Returns an empty array (`[]`) when everyone is settled.
+3. **Balance computation:** Debtors and creditors are sorted alphabetically and a greedy algorithm pairs them, producing the minimal number of recommended transfers.
+4. Each entry includes a `breakdown` array showing how each expense contributes to the transfer. Positive amounts mean the `from` user owes the `to` user for that expense; negative amounts mean the `to` user owes the `from` user for that expense (reducing the net owed).
+5. Amounts are rounded to 2 decimal places.
+6. Returns an empty array (`[]`) when everyone is balanced.
 
 **Example:**
 - Alice pays $100 for dinner split 4 ways → Alice is owed $75, others owe $25 each.
 - Bob pays Alice $25 (confirmed) → Alice is owed $50, Bob owes $0, Charlie owes $25, Dave owes $25.
-- Settlement: `[{"from": "charlie-uuid", "to": "alice-uuid", "amount": 25.00}, {"from": "dave-uuid", "to": "alice-uuid", "amount": 25.00}]`
+- Response: `[{"from": "charlie-uuid", "to": "alice-uuid", "amount": 25.00, "breakdown": [{"expense_name": "Dinner", "amount": 25.00}]}, {"from": "dave-uuid", "to": "alice-uuid", "amount": 25.00, "breakdown": [{"expense_name": "Dinner", "amount": 25.00}]}]`
 
 ---
 

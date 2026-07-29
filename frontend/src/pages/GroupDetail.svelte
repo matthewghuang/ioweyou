@@ -295,7 +295,7 @@
       class="tab"
       class:active={activeTab === 'balances'}
       onclick={() => activeTab = 'balances'}
-    >Settlements</button>
+    >Balance</button>
   </div>
 
   <!-- ==================== EXPENSES TAB ==================== -->
@@ -476,23 +476,35 @@
   {:else if activeTab === 'balances'}
     {#if balances.length === 0}
       <div class="empty-state">
-        <p>All settled up!</p>
+        <p>All balanced up!</p>
         <p style="margin-top: 0.25rem; font-size: 0.85rem;">No outstanding balances.</p>
       </div>
     {:else}
       <div class="card">
         <div class="card-header">
-          <span class="card-title">Settlement Recommendations</span>
+          <span class="card-title">Balance Breakdown</span>
         </div>
         <div class="bal-list">
           {#each balances as bal}
             <div class="bal-item">
-              <div class="bal-direction">
-                <span class="uuid-short">{getMemberName(bal.from)}</span>
-                <span class="bal-arrow">&rarr;</span>
-                <span class="uuid-short">{getMemberName(bal.to)}</span>
+              <div class="bal-main">
+                <div class="bal-direction">
+                  <span class="uuid-short">{getMemberName(bal.from)}</span>
+                  <span class="bal-arrow">&rarr;</span>
+                  <span class="uuid-short">{getMemberName(bal.to)}</span>
+                </div>
+                <span class="amount amount-negative">${fmt(bal.amount)}</span>
               </div>
-              <span class="amount amount-negative">${fmt(bal.amount)}</span>
+              {#if bal.breakdown && bal.breakdown.length > 0}
+                <div class="bal-breakdown">
+                  {#each bal.breakdown as b}
+                    <div class="bal-breakdown-item">
+                      <span class="bal-breakdown-name">{b.expense_name}</span>
+                      <span class="bal-breakdown-amt" class:negative={b.amount < 0}>{b.amount < 0 ? '-$' : '$'}{fmt(Math.abs(b.amount))}</span>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
@@ -576,15 +588,18 @@
   }
 
   .bal-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     padding: 0.75rem 0;
     border-bottom: 1px solid var(--border);
   }
 
   .bal-item:last-child {
     border-bottom: none;
+  }
+
+  .bal-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
 
   .bal-direction {
@@ -596,5 +611,32 @@
   .bal-arrow {
     color: var(--text-muted);
     font-size: 1.1rem;
+  }
+
+  .bal-breakdown {
+    margin-top: 0.5rem;
+    padding-left: 0.25rem;
+    border-top: 1px solid var(--border-subtle, var(--border));
+    padding-top: 0.5rem;
+  }
+
+  .bal-breakdown-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85rem;
+    padding: 0.15rem 0;
+  }
+
+  .bal-breakdown-name {
+    color: var(--text-muted);
+  }
+
+  .bal-breakdown-amt {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .bal-breakdown-amt.negative {
+    color: var(--text-danger, #c0392b);
   }
 </style>

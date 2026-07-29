@@ -10,11 +10,18 @@ import (
 	"github.com/matthewghuang/ioweyou/internal/auth"
 )
 
-// BalanceEntry represents a recommended settlement between two users.
+// BreakdownItem shows how one expense contributes to a balance entry.
+type BreakdownItem struct {
+	ExpenseName string  `json:"expense_name"`
+	Amount      float64 `json:"amount"`
+}
+
+// BalanceEntry represents a recommended transfer between two users.
 type BalanceEntry struct {
-	From   string  `json:"from"`
-	To     string  `json:"to"`
-	Amount float64 `json:"amount"`
+	From      string          `json:"from"`
+	To        string          `json:"to"`
+	Amount    float64         `json:"amount"`
+	Breakdown []BreakdownItem `json:"breakdown"`
 }
 
 func GetBalances(s *Server) http.HandlerFunc {
@@ -66,6 +73,15 @@ func GetBalances(s *Server) http.HandlerFunc {
 			return
 		}
 
+		// Track debt edges between users for per-expense breakdown
+		type debtEdge struct {
+			fromUser    string
+			toUser      string
+			amount      float64
+			expenseName string
+		}
+		var allDebts []debtEdge
+
 		for _, docID := range docIDs {
 			state, err := s.Store.GetLatestState(docID)
 			if err != nil || len(state) == 0 {
@@ -77,6 +93,7 @@ func GetBalances(s *Server) http.HandlerFunc {
 
 			// Process as expense if it has paid_by and splits
 			paidBy, _ := state["paid_by"].(string)
+			description, _ := state["description"].(string)
 			amount, _ := state["amount"].(float64)
 			if paidBy != "" && amount > 0 {
 				// Payer is owed the total amount
@@ -95,6 +112,16 @@ func GetBalances(s *Server) http.HandlerFunc {
 						continue
 					}
 					balances[uid] -= splitAmt
+
+					// Track edge for breakdown (skip self-edges)
+					if uid != paidBy && description != "" {
+						allDebts = append(allDebts, debtEdge{
+							fromUser:    uid,
+							toUser:      paidBy,
+							amount:      splitAmt,
+							expenseName: description,
+						})
+					}
 				}
 			}
 
@@ -113,7 +140,7 @@ func GetBalances(s *Server) http.HandlerFunc {
 			}
 		}
 
-		// --- Build settlement recommendations ---
+		// --- Build balance / settlement recommendations ---
 		var debtors, creditors []string
 		for uid, bal := range balances {
 			if bal < -0.01 {
@@ -125,6 +152,64 @@ func GetBalances(s *Server) http.HandlerFunc {
 		sort.Strings(debtors)
 		sort.Strings(creditors)
 
+		computeBreakdown := func(debtor, creditor string, capAmount float64) []BreakdownItem {
+			var forward, reverse []debtEdge
+			for _, d := range allDebts {
+				if d.fromUser == debtor && d.toUser == creditor {
+					forward = append(forward, d)
+				} else if d.fromUser == creditor && d.toUser == debtor {
+					reverse = append(reverse, d)
+				}
+			}
+
+			// Compute full net total from all direct edges between the pair
+			var fwdTotal, revTotal float64
+			for _, d := range forward {
+				fwdTotal += d.amount
+			}
+			for _, d := range reverse {
+				revTotal += d.amount
+			}
+			netTotal := fwdTotal - revTotal
+
+			if netTotal < 0.01 {
+				// Edge net contradicts transfer direction (transitive debt through a third party)
+				return nil
+			}
+
+			// Scale proportionally so breakdown sums to the transfer amount
+			// capAmount may be less than netTotal when third parties affect balances
+			scale := capAmount / netTotal
+			if scale > 1.0 {
+				scale = 1.0
+			}
+
+			items := make([]BreakdownItem, 0, len(forward)+len(reverse))
+			for _, d := range forward {
+				amt := math.Round(d.amount*scale*100) / 100
+				if amt >= 0.01 {
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: amt})
+				}
+			}
+			for _, d := range reverse {
+				amt := math.Round(d.amount*scale*100) / 100
+				if amt >= 0.01 {
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: -amt})
+				}
+			}
+
+			// Absorb rounding pennies into the last item
+			sum := 0.0
+			for _, b := range items {
+				sum += b.Amount
+			}
+			diff := math.Round((capAmount-sum)*100) / 100
+			if math.Abs(diff) >= 0.005 {
+				items = append(items, BreakdownItem{ExpenseName: "Remaining balance", Amount: diff})
+			}
+			return items
+		}
+
 		var settlements []BalanceEntry
 		for _, debtor := range debtors {
 			for _, creditor := range creditors {
@@ -133,10 +218,15 @@ func GetBalances(s *Server) http.HandlerFunc {
 					continue
 				}
 				rounded := math.Round(amt*100) / 100
+				breakdown := computeBreakdown(debtor, creditor, rounded)
+				if breakdown == nil {
+					breakdown = []BreakdownItem{}
+				}
 				settlements = append(settlements, BalanceEntry{
-					From:   debtor,
-					To:     creditor,
-					Amount: rounded,
+					From:      debtor,
+					To:        creditor,
+					Amount:    rounded,
+					Breakdown: breakdown,
 				})
 				balances[debtor] += amt
 				balances[creditor] -= amt

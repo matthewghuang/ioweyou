@@ -57,7 +57,7 @@ frontend/
 | Register | `currentPage = 'register'` | Create a new user account, get an API key |
 | Login | `currentPage = 'login'` | Enter an existing API key |
 | Groups | `currentPage = 'groups'` | List all groups, create new ones |
-| Group Detail | `currentPage = 'group'` | View expenses, payments, and settlement recommendations |
+| Group Detail | `currentPage = 'group'` | View expenses, payments, and balance breakdown |
 
 ## API
 
@@ -73,4 +73,4 @@ The app communicates with the backend via REST API:
 - `POST /api/groups/{id}/payments` — Record a payment
 - `POST /api/payments/{id}/confirm` — Confirm a payment
 - `DELETE /api/payments/{id}` — Cancel a payment
-- `GET /api/groups/{id}/balances` — Get settlement recommendations
+- `GET /api/groups/{id}/balances` — Get balance breakdown
