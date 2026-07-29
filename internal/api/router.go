@@ -2,7 +2,11 @@ package api
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -20,7 +24,8 @@ type Server struct {
 }
 
 // NewRouter creates a chi router with all routes mounted.
-func NewRouter(s *Server) http.Handler {
+// If staticDir is non-empty and exists, frontend files are served with SPA fallback.
+func NewRouter(s *Server, staticDir string) http.Handler {
 	r := chi.NewRouter()
 
 	// Middleware
@@ -79,5 +84,27 @@ func NewRouter(s *Server) http.Handler {
 		r.Post("/api/sync/push", sync.HandlePush(s.AuthDB, s.HLC, s.Broadcaster))
 	})
 
+	// Frontend SPA serving
+	if staticDir != "" {
+		if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
+			absDir, _ := filepath.Abs(staticDir)
+			log.Printf("serving frontend from %s", absDir)
+
+			// Serve static assets directly
+			r.Get("/assets/*", func(w http.ResponseWriter, r *http.Request) {
+				http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(absDir, "assets")))).ServeHTTP(w, r)
+			})
+
+			// All other non-API, non-WS routes → index.html (SPA fallback)
+			r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+				http.ServeFile(w, r, filepath.Join(absDir, "index.html"))
+			})
+		} else {
+			log.Printf("frontend directory %s not found, API-only mode", staticDir)
+		}
+	}
+
 	return r
 }
+
+
