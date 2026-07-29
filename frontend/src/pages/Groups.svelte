@@ -47,7 +47,7 @@
         <div class="group-card-main" onclick={() => selectGroup(group.slug)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && selectGroup(group.slug)}>
           <div class="group-card-name">{group.name}</div>
           <div class="group-card-meta">
-            <span class="badge">Signed in as {group.member_name}</span>
+            <span class="badge">Signed in as {group.member_name} (you)</span>
           </div>
         </div>
         <div class="group-card-actions">

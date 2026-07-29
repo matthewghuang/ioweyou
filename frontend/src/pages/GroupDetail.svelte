@@ -221,8 +221,8 @@
 
   function getMemberName(uid) {
     const member = members.find(m => m.id === uid);
-    if (member) return member.name;
-    return truncId(uid);
+    if (!member) return truncId(uid);
+    return uid === currentMemberId ? `${member.name} (you)` : member.name;
   }
 
   // ---- Init ----
@@ -270,7 +270,7 @@
       <h2 class="detail-title">{group.name}</h2>
       <div class="member-chips">
         {#each members as m}
-          <span class="member-chip" title={m.id}>{m.name}</span>
+          <span class="member-chip" title={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</span>
         {/each}
       </div>
     </div>
@@ -407,7 +407,7 @@
               <select id="pay-from" class="form-select" bind:value={payFrom} required disabled={payCreating}>
                 <option value="">Select payer</option>
                 {#each members as m}
-                  <option value={m.id}>{m.name}</option>
+                  <option value={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</option>
                 {/each}
               </select>
             </div>
@@ -416,7 +416,7 @@
               <select id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
                 <option value="">Select recipient</option>
                 {#each members as m}
-                  <option value={m.id}>{m.name}</option>
+                  <option value={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</option>
                 {/each}
               </select>
             </div>
