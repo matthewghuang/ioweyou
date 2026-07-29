@@ -152,8 +152,8 @@
   function resetPayForm() {
     payFrom = currentMemberId || '';
     payTo = '';
-    payAmt = 0;
     payMethod = '';
+    payAmt = 0;
     payError = '';
     showPayForm = false;
   }
@@ -403,13 +403,8 @@
         <form onsubmit={handleCreatePayment}>
           <div class="field-row">
             <div class="form-group">
-              <label class="form-label" for="pay-from">From (payer)</label>
-              <select id="pay-from" class="form-select" bind:value={payFrom} required disabled={payCreating}>
-                <option value="">Select payer</option>
-                {#each members as m}
-                  <option value={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</option>
-                {/each}
-              </select>
+              <div class="form-label">From (you)</div>
+              <div class="form-static-value">{members.find(m => m.id === currentMemberId)?.name || 'You'}</div>
             </div>
             <div class="form-group">
               <label class="form-label" for="pay-to">To (recipient)</label>
@@ -572,6 +567,18 @@
   .split-input {
     width: 120px;
     flex-shrink: 0;
+  }
+
+  .form-static-value {
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-muted, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.9rem;
+    color: var(--text);
+    min-height: 38px;
+    display: flex;
+    align-items: center;
   }
 
   .pay-actions {
