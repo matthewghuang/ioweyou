@@ -45,6 +45,10 @@ func CreatePayment(s *Server) http.HandlerFunc {
 			respondError(w, 400, "invalid payment")
 			return
 		}
+		if body.FromUser != member.MemberID {
+			respondError(w, 403, "you can only record payments from yourself")
+			return
+		}
 
 		docID := uuid.New().String()
 		ts := s.HLC.Now()
