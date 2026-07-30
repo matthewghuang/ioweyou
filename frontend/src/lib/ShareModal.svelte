@@ -93,13 +93,14 @@
   }
 
   .modal {
-    background: var(--surface, #1e1e1e);
+    background: var(--bg-card, #1e1e1e);
     border-radius: 12px;
-    padding: 2rem;
+    padding: 1.5rem;
     max-width: 380px;
     width: 100%;
     position: relative;
     text-align: center;
+    margin: 1rem;
   }
 
   .close-btn {
@@ -181,5 +182,10 @@
     display: flex;
     gap: 0.5rem;
     justify-content: center;
+  }
+
+  .modal-actions .btn {
+    flex: 1;
+    max-width: 160px;
   }
 </style>

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { getAllGroups, getToken } from '../lib/api.js';
   import { currentGroupSlug } from '../lib/stores.js';
+  import { haptic } from '../lib/haptic.js';
   import ShareModal from '../lib/ShareModal.svelte';
 
   let { onSelectGroup } = $props();
@@ -51,7 +52,7 @@
           </div>
         </div>
         <div class="group-card-actions">
-          <button class="btn btn-sm share-btn" onclick={() => openShare(group.slug)} title="Share invite link">Share</button>
+          <button class="btn btn-sm share-btn" onclick={() => openShare(group.slug)} title="Share invite link" use:haptic>Share</button>
           <span class="group-card-arrow" onclick={() => selectGroup(group.slug)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && selectGroup(group.slug)}>&rarr;</span>
         </div>
       </div>
@@ -68,7 +69,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1.25rem;
+    margin-bottom: 1rem;
+    min-height: var(--touch-target, 44px);
   }
 
   .page-title {
@@ -79,7 +81,7 @@
   .group-list {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.625rem;
   }
 
   .group-card {
@@ -89,7 +91,7 @@
     transition: background 0.15s, border-color 0.15s;
     width: 100%;
     border: 1px solid var(--border);
-    padding: 0.75rem 1rem;
+    padding: 0.75rem 0.75rem;
   }
 
   .group-card:hover {
@@ -97,11 +99,15 @@
     border-color: var(--text-muted);
   }
 
+  .group-card:active {
+    transform: scale(0.99);
+  }
+
   .group-card-main {
     flex: 1;
     min-width: 0;
     cursor: pointer;
-    padding: 0;
+    padding: 0.375rem 0;
     background: none;
     border: none;
     text-align: left;
@@ -138,6 +144,7 @@
 
   .share-btn {
     font-size: 0.8rem;
+    min-height: var(--touch-target, 44px);
   }
 
   .group-card-arrow {

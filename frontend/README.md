@@ -1,6 +1,17 @@
 # I Owe You — Frontend
 
-A Svelte-based single-page application for the I Owe You group-expense tracking app.
+A single-column PWA for group expense tracking, built with Svelte 5.
+
+Features:
+- Create and join expense groups with password protection
+- Add expenses with equal or custom splits
+- Record and confirm payments between members
+- Real-time balance breakdown
+- Offline support via CRDT-based sync (operations queue locally, replay when online)
+- Installable PWA with service worker and Workbox caching
+- Mobile-first gestures: swipe-back, pull-to-refresh, swipe-to-reveal actions
+- Touch-optimized with 44px minimum tap targets
+- Dark theme with safe-area-inset support for notched phones
 
 ## Prerequisites
 
@@ -31,46 +42,60 @@ Output goes to `dist/`. Serve it with any static file server.
 
 ```
 frontend/
-├── index.html              # Entry point
-├── vite.config.js          # Vite config with proxy
+├── index.html              # Entry point with PWA meta tags
+├── vite.config.js          # Vite config with PWA plugin
 ├── svelte.config.js        # Svelte config
 ├── package.json
 ├── README.md
+├── playwright.config.js    # E2E test config (chromium + Mobile Safari)
+├── public/
+│   ├── icon-192.png        # PWA app icon
+│   └── icon-512.png        # PWA app icon
+├── e2e/
+│   ├── helpers.js          # Test helpers (API + UI interactions)
+│   ├── README.md           # Testing instructions
+│   └── tests/
+│       ├── group.test.js
+│       ├── expense.test.js
+│       ├── payment.test.js
+│       ├── balance.test.js
+│       └── offline-sync.test.js  # Offline → online CRDT sync test
 └── src/
     ├── main.js             # App bootstrap
-    ├── app.css             # Global dark theme styles
-    ├── App.svelte          # Root component with routing
+    ├── app.css             # Global dark theme + mobile-first styles
+    ├── App.svelte          # Root component with routing (lazy-loads GroupDetail)
     ├── lib/
-    │   ├── api.js          # API client (auth header, fetch wrapper)
-    │   └── stores.js       # Svelte stores for page/group/user state
+    │   ├── api.js          # REST API client + auth helpers
+    │   ├── stores.js       # Svelte stores (currentPage, currentGroupSlug)
+    │   ├── websocket.js    # WebSocket connection for live updates
+    │   ├── gestures.js     # Svelte actions: swipeBack, pullToRefresh, swipeReveal
+    │   ├── crdt.js         # CRDT engine: mergeState, snapshot, HLC
+    │   ├── db.js           # IndexedDB persistence for offline ops
+    │   ├── sync.js         # Sync service: push/pull orchestration
+    │   ├── networkStore.js # Online/offline detection store
+    │   ├── toastStore.js   # Toast notification store
+    │   ├── Toast.svelte    # Toast notification component
+    │   ├── ToastContainer.svelte
+    │   ├── BottomSheet.svelte   # Confirmation bottom sheet
+    │   ├── OfflineBanner.svelte # Offline status banner
+    │   ├── haptic.js       # Haptic feedback Svelte action
+    │   └── forms.js        # Form utilities (scrollIntoViewOnFocus)
     └── pages/
-        ├── Register.svelte   # New user registration
-        ├── Login.svelte      # API key login
-        ├── Groups.svelte     # Group list + create
-        └── GroupDetail.svelte # Group detail with tabs
+        ├── Landing.svelte      # Create a new group
+        ├── Join.svelte         # Join an existing group
+        ├── Groups.svelte       # List of joined groups
+        └── GroupDetail.svelte  # Group detail with tabs (lazy-loaded)
 ```
 
 ## Pages
 
 | Page | Route (state) | Description |
 |------|--------------|-------------|
-| Register | `currentPage = 'register'` | Create a new user account, get an API key |
-| Login | `currentPage = 'login'` | Enter an existing API key |
-| Groups | `currentPage = 'groups'` | List all groups, create new ones |
-| Group Detail | `currentPage = 'group'` | View expenses, payments, and balance breakdown |
+| Landing | `currentPage = 'landing'` | Create a new group with name, member name, and password |
+| Join | `currentPage = 'join'` | Join an existing group via invite slug/code |
+| Groups | `currentPage = 'groups'` | List all joined groups, share invites |
+| Group Detail | `currentPage = 'group'` | View expenses, payments, and balance (lazy-loaded) |
 
 ## API
 
-The app communicates with the backend via REST API:
-
-- `POST /api/auth/register` — Register a new user
-- `GET /api/groups` — List user's groups
-- `POST /api/groups` — Create a group
-- `GET /api/groups/{id}` — Get group details
-- `GET /api/groups/{id}/expenses` — List expenses
-- `POST /api/groups/{id}/expenses` — Add an expense
-- `GET /api/groups/{id}/payments` — List payments
-- `POST /api/groups/{id}/payments` — Record a payment
-- `POST /api/payments/{id}/confirm` — Confirm a payment
-- `DELETE /api/payments/{id}` — Cancel a payment
-- `GET /api/groups/{id}/balances` — Get balance breakdown
+The app communicates with the backend via REST API. See `docs/api.md` for full documentation.

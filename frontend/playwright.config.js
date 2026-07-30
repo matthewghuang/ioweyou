@@ -31,6 +31,13 @@ export default defineConfig({
         colorScheme: 'dark',
       },
     },
+    {
+      name: 'Mobile Safari',
+      use: {
+        ...devices['iPhone 14'],
+        colorScheme: 'dark',
+      },
+    },
   ],
 
   webServer: process.env.CI

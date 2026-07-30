@@ -1,8 +1,17 @@
 <script>
   import { currentGroupSlug } from '../lib/stores.js';
   import { api, getToken, getGroupInfo } from '../lib/api.js';
+  import { createOp, getLocalOps, syncGroup, syncInProgress } from '../lib/sync.js';
+  import { HLC } from '../lib/crdt.js';
+  import { online, pendingOpsCount } from '../lib/networkStore.js';
+  import { get } from 'svelte/store';
   import { connect, subscribe, setOnUpdate, disconnect as wsDisconnect } from '../lib/websocket.js';
   import ShareModal from '../lib/ShareModal.svelte';
+import { swipeBack, pullToRefresh, swipeReveal } from '../lib/gestures.js';
+  import { haptic } from '../lib/haptic.js';
+  import BottomSheet from '../lib/BottomSheet.svelte';
+  import { showToast } from '../lib/toastStore.js';
+import { scrollIntoViewOnFocus } from '../lib/forms.js';
 
   let { onBack } = $props();
 
@@ -38,7 +47,19 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   let payError = $state('');
 
   let currentMemberId = $state(null);
+  let confirmDialog = $state({ show: false, payId: null });
+  let fabLabel = $derived(activeTab === 'expenses' ? 'Add expense' : 'Record payment');
+
+  function toggleFabAction() {
+    if (activeTab === 'expenses') {
+      showExpForm = !showExpForm;
+    } else if (activeTab === 'payments') {
+      showPayForm = !showPayForm;
+    }
+  }
+
   let loadGen = 0;
+  let hlc = new HLC();
 
   // ---- Helpers ----
 
@@ -122,18 +143,47 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     expError = '';
     expCreating = true;
     const token = getToken(slug);
-    try {
-      const body = {
-        description: expDesc,
-        amount: parseFloat(expAmt),
-        split_type: expSplitType,
-      };
-      if (expSplitType === 'custom') {
-        body.splits = expCustomSplits
-          .filter(s => s.amount > 0)
-          .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+
+    // CRDT ops for offline fallback
+    const expenseId = crypto.randomUUID();
+    const timestamp = hlc.now();
+    const groupInfo = getGroupInfo(slug);
+    const groupId = groupInfo?.internal_id || slug;
+
+    const ops = [];
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'paid_by', value: JSON.stringify(currentMemberId), author_id: currentMemberId, timestamp });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp });
+
+    if (expSplitType === 'custom' && expCustomSplits.length > 0) {
+      for (const split of expCustomSplits.filter(s => s.amount > 0)) {
+        ops.push({
+          doc_id: expenseId, op_type: 'rga_insert', field: 'splits',
+          value: JSON.stringify({ user_id: split.user_id, amount: parseFloat(split.amount) }),
+          item_id: crypto.randomUUID(), prev_item_id: '',
+          author_id: currentMemberId, timestamp: hlc.now(),
+        });
       }
-      await api.post(`/api/groups/${slug}/expenses`, body, token);
+    }
+
+    try {
+      if (get(online)) {
+        const body = {
+          description: expDesc,
+          amount: parseFloat(expAmt),
+          split_type: expSplitType,
+        };
+        if (expSplitType === 'custom') {
+          body.splits = expCustomSplits
+            .filter(s => s.amount > 0)
+            .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+        }
+        await api.post(`/api/groups/${slug}/expenses`, body, token);
+      } else {
+        throw new Error('offline');
+      }
       resetExpForm();
       const [exps, bals] = await Promise.all([
         api.get(`/api/groups/${slug}/expenses`, token),
@@ -142,7 +192,28 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       expenses = exps;
       balances = bals;
     } catch (e) {
-      expError = e.message;
+      if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+        // Offline: queue CRDT ops
+        for (const op of ops) {
+          await createOp(op, slug);
+        }
+        const newExpense = {
+          id: expenseId,
+          description: expDesc,
+          amount: parseFloat(expAmt),
+          split_type: expSplitType,
+          paid_by: currentMemberId,
+          created_at: Date.now(),
+          splits: expSplitType === 'custom'
+            ? expCustomSplits.filter(s => s.amount > 0).map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }))
+            : [],
+          _pending: true,
+        };
+        expenses = [...expenses, newExpense];
+        resetExpForm();
+      } else {
+        expError = e.message;
+      }
     } finally {
       expCreating = false;
     }
@@ -164,13 +235,33 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     payError = '';
     payCreating = true;
     const token = getToken(slug);
+
+    // CRDT ops for offline fallback
+    const paymentId = crypto.randomUUID();
+    const timestamp = hlc.now();
+    const groupInfo = getGroupInfo(slug);
+    const groupId = groupInfo?.internal_id || slug;
+
+    const ops = [
+      { doc_id: paymentId, op_type: 'lww', field: 'from_user', value: JSON.stringify(payFrom), author_id: currentMemberId, timestamp },
+      { doc_id: paymentId, op_type: 'lww', field: 'to_user', value: JSON.stringify(payTo), author_id: currentMemberId, timestamp },
+      { doc_id: paymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp },
+      { doc_id: paymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp },
+      { doc_id: paymentId, op_type: 'lww', field: 'status', value: JSON.stringify('pending'), author_id: currentMemberId, timestamp },
+      { doc_id: paymentId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp },
+    ];
+
     try {
-      await api.post(`/api/groups/${slug}/payments`, {
-        from_user: payFrom,
-        to_user: payTo,
-        amount: parseFloat(payAmt),
-        method: payMethod || undefined,
-      }, token);
+      if (get(online)) {
+        await api.post(`/api/groups/${slug}/payments`, {
+          from_user: payFrom,
+          to_user: payTo,
+          amount: parseFloat(payAmt),
+          method: payMethod || undefined,
+        }, token);
+      } else {
+        throw new Error('offline');
+      }
       resetPayForm();
       const [pays, bals] = await Promise.all([
         api.get(`/api/groups/${slug}/payments`, token),
@@ -179,7 +270,26 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       payments = pays;
       balances = bals;
     } catch (e) {
-      payError = e.message;
+      if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+        // Offline: queue CRDT ops
+        for (const op of ops) {
+          await createOp(op, slug);
+        }
+        const newPayment = {
+          id: paymentId,
+          from_user: payFrom,
+          to_user: payTo,
+          amount: parseFloat(payAmt),
+          method: payMethod || '',
+          status: 'pending',
+          created_at: Date.now(),
+          _pending: true,
+        };
+        payments = [...payments, newPayment];
+        resetPayForm();
+      } else {
+        payError = e.message;
+      }
     } finally {
       payCreating = false;
     }
@@ -197,13 +307,20 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       ]);
       payments = pays;
       balances = bals;
+      showToast('Payment confirmed', 'success');
     } catch (e) {
-      alert('Failed to confirm: ' + e.message);
+      showToast('Failed to confirm: ' + e.message, 'error');
     }
   }
 
   async function handleCancelPayment(payId) {
-    if (!confirm('Cancel this payment?')) return;
+    confirmDialog = { show: true, payId };
+  }
+
+  async function onConfirmCancel() {
+    const payId = confirmDialog.payId;
+    confirmDialog = { show: false, payId: null };
+    if (!payId) return;
     const token = getToken(slug);
     try {
       await api.del(`/api/payments/${payId}`, token);
@@ -213,8 +330,9 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       ]);
       payments = pays;
       balances = bals;
+      showToast('Payment cancelled', 'info');
     } catch (e) {
-      alert('Failed to cancel: ' + e.message);
+      showToast('Failed to cancel: ' + e.message, 'error');
     }
   }
 
@@ -250,7 +368,18 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       loadAll();
     });
 
+    const unsubOnline = online.subscribe(async ($online) => {
+      if ($online && s) {
+        const localOps = await getLocalOps(s);
+        if (localOps.length > 0) {
+          await syncGroup(s);
+          await loadAll();
+        }
+      }
+    });
+
     return () => {
+      unsubOnline();
       loadGen++;
       setOnUpdate(null);
       wsDisconnect();
@@ -265,6 +394,8 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
 </script>
 
+<div class="detail-page" use:swipeBack={{ onBack }}>
+  <div class="detail-scroll" use:pullToRefresh={{ onRefresh: loadAll }}>
 {#if loading}
   <div class="empty-state"><span class="spinner"></span> Loading group…</div>
 {:else if error}
@@ -272,7 +403,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   <button class="btn" onclick={loadAll}>Retry</button>
 {:else if group}
   <div class="detail-header">
-    <button class="btn btn-sm" onclick={onBack}>&larr; Back</button>
+    <button class="btn btn-sm" onclick={onBack} use:haptic>&larr; Back</button>
     <div class="detail-header-info">
       <h2 class="detail-title">{group.name}</h2>
       <div class="member-chips">
@@ -281,7 +412,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
         {/each}
       </div>
     </div>
-    <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link">
+    <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link" use:haptic>
       Share
     </button>
   </div>
@@ -292,23 +423,26 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       class="tab"
       class:active={activeTab === 'expenses'}
       onclick={() => activeTab = 'expenses'}
+      use:haptic
     >Expenses ({expenses.length})</button>
     <button
       class="tab"
       class:active={activeTab === 'payments'}
       onclick={() => activeTab = 'payments'}
+      use:haptic
     >Payments ({payments.length})</button>
     <button
       class="tab"
       class:active={activeTab === 'balances'}
       onclick={() => activeTab = 'balances'}
+      use:haptic
     >Balance</button>
   </div>
 
   <!-- ==================== EXPENSES TAB ==================== -->
   {#if activeTab === 'expenses'}
     <div class="section-actions">
-      <button class="btn btn-primary btn-sm" onclick={() => showExpForm = !showExpForm}>
+      <button class="btn btn-primary btn-sm" onclick={() => showExpForm = !showExpForm} use:haptic>
         {showExpForm ? 'Cancel' : '+ Add Expense'}
       </button>
     </div>
@@ -322,16 +456,16 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
         <form onsubmit={handleCreateExpense}>
           <div class="form-group">
             <label class="form-label" for="exp-desc">Description</label>
-            <input id="exp-desc" class="form-input" type="text" placeholder="e.g. Dinner" bind:value={expDesc} required disabled={expCreating} />
+            <input use:scrollIntoViewOnFocus id="exp-desc" class="form-input" type="text" placeholder="e.g. Dinner" bind:value={expDesc} required disabled={expCreating} />
           </div>
           <div class="field-row">
             <div class="form-group">
               <label class="form-label" for="exp-amt">Amount</label>
-              <input id="exp-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={expAmt} required disabled={expCreating} />
+              <input use:scrollIntoViewOnFocus id="exp-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={expAmt} required disabled={expCreating} />
             </div>
             <div class="form-group">
               <label class="form-label" for="exp-split">Split type</label>
-              <select id="exp-split" class="form-select" bind:value={expSplitType} disabled={expCreating} onchange={handleSplitTypeChange}>
+              <select use:scrollIntoViewOnFocus id="exp-split" class="form-select" bind:value={expSplitType} disabled={expCreating} onchange={handleSplitTypeChange}>
                 <option value="equal">Equal</option>
                 <option value="custom">Custom</option>
               </select>
@@ -343,7 +477,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             {#each expCustomSplits as split, i}
               <div class="split-row">
                 <span class="uuid-short">{getMemberName(split.user_id)}</span>
-                <input
+                <input use:scrollIntoViewOnFocus
                   class="form-input split-input"
                   type="number"
                   step="0.01"
@@ -359,7 +493,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             {/if}
           {/if}
 
-          <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;">
+          <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;" use:haptic>
             {expCreating ? 'Adding…' : 'Add Expense'}
           </button>
         </form>
@@ -370,36 +504,39 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       <div class="empty-state">No expenses yet.</div>
     {:else}
       {#each expenses as exp}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">{exp.description}</span>
-            <span class="amount">${fmt(exp.amount)}</span>
-          </div>
-          <div class="exp-meta">
-            <span class="badge">paid by {getMemberName(exp.paid_by)}</span>
-            <span class="badge">{exp.split_type}</span>
-            {#if exp.created_at}
-              <span class="list-item-subtitle">{formatDate(exp.created_at)}</span>
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">{exp.description}</span>
+              <span class="amount">${fmt(exp.amount)}</span>
+            </div>
+            <div class="exp-meta">
+              <span class="badge">paid by {getMemberName(exp.paid_by)}</span>
+              <span class="badge">{exp.split_type}</span>
+              {#if exp.created_at}
+                <span class="list-item-subtitle">{formatDate(exp.created_at)}</span>
+              {/if}
+              {#if exp._pending}
+                <span class="badge badge-warning" title="Not yet synced">Pending</span>
+              {/if}
+            </div>
+            {#if exp.splits && exp.splits.length > 0}
+              <div class="split-list">
+                {#each exp.splits as split}
+                  <div class="split-item">
+                    <span class="uuid-short">{getMemberName(split.user_id)}</span>
+                    <span class="amount">${fmt(split.amount)}</span>
+                  </div>
+                {/each}
+              </div>
             {/if}
           </div>
-          {#if exp.splits && exp.splits.length > 0}
-            <div class="split-list">
-              {#each exp.splits as split}
-                <div class="split-item">
-                  <span class="uuid-short">{getMemberName(split.user_id)}</span>
-                  <span class="amount">${fmt(split.amount)}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
-        </div>
       {/each}
     {/if}
 
   <!-- ==================== PAYMENTS TAB ==================== -->
   {:else if activeTab === 'payments'}
     <div class="section-actions">
-      <button class="btn btn-primary btn-sm" onclick={() => showPayForm = !showPayForm}>
+      <button class="btn btn-primary btn-sm" onclick={() => showPayForm = !showPayForm} use:haptic>
         {showPayForm ? 'Cancel' : '+ Record Payment'}
       </button>
     </div>
@@ -418,7 +555,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             </div>
             <div class="form-group">
               <label class="form-label" for="pay-to">To (recipient)</label>
-              <select id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
+              <select use:scrollIntoViewOnFocus id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
                 <option value="">Select recipient</option>
                 {#each members as m}
                   <option value={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</option>
@@ -429,14 +566,14 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           <div class="field-row">
             <div class="form-group">
               <label class="form-label" for="pay-amt">Amount</label>
-              <input id="pay-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={payAmt} required disabled={payCreating} />
+              <input use:scrollIntoViewOnFocus id="pay-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={payAmt} required disabled={payCreating} />
             </div>
             <div class="form-group">
               <label class="form-label" for="pay-method">Method (optional)</label>
-              <input id="pay-method" class="form-input" type="text" placeholder="e.g. Venmo" bind:value={payMethod} disabled={payCreating} />
+              <input use:scrollIntoViewOnFocus id="pay-method" class="form-input" type="text" placeholder="e.g. Venmo" bind:value={payMethod} disabled={payCreating} />
             </div>
           </div>
-          <button class="btn btn-primary" type="submit" disabled={payCreating}>
+          <button class="btn btn-primary" type="submit" disabled={payCreating} use:haptic>
             {payCreating ? 'Recording…' : 'Record Payment'}
           </button>
         </form>
@@ -447,32 +584,38 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       <div class="empty-state">No payments recorded yet.</div>
     {:else}
       {#each payments as pay}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">{getMemberName(pay.from_user)} &rarr; {getMemberName(pay.to_user)}</span>
-            <span class="amount">${fmt(pay.amount)}</span>
-          </div>
-          <div class="exp-meta">
-            {#if pay.status === 'confirmed'}
-              <span class="badge badge-success">confirmed</span>
-            {:else}
-              <span class="badge badge-warning">pending</span>
-            {/if}
-            {#if pay.method}
-              <span class="badge">{pay.method}</span>
-            {/if}
-            {#if pay.created_at}
-              <span class="list-item-subtitle">{formatDate(pay.created_at)}</span>
-            {/if}
-          </div>
-          {#if pay.status === 'pending'}
-            <div class="pay-actions">
-              {#if currentMemberId && pay.to_user === currentMemberId}
-                <button class="btn btn-sm btn-primary" onclick={() => handleConfirmPayment(pay.id)}>Confirm</button>
-              {/if}
-              <button class="btn btn-sm btn-danger" onclick={() => handleCancelPayment(pay.id)}>Cancel</button>
+        <div class="swipe-container" use:swipeReveal={{ onAction: () => handleCancelPayment(pay.id), actionLabel: 'Cancel', actionVariant: 'danger' }}>
+          <div class="swipe-content card">
+            <div class="card-header">
+              <span class="card-title">{getMemberName(pay.from_user)} &rarr; {getMemberName(pay.to_user)}</span>
+              <span class="amount">${fmt(pay.amount)}</span>
             </div>
-          {/if}
+            <div class="exp-meta">
+              {#if pay.status === 'confirmed'}
+                <span class="badge badge-success">confirmed</span>
+              {:else}
+                <span class="badge badge-warning">pending</span>
+              {/if}
+              {#if pay.method}
+                <span class="badge">{pay.method}</span>
+              {/if}
+              {#if pay.created_at}
+                <span class="list-item-subtitle">{formatDate(pay.created_at)}</span>
+              {/if}
+              {#if pay._pending}
+                <span class="badge badge-warning" title="Not yet synced">Pending</span>
+              {/if}
+            </div>
+            {#if pay.status === 'pending'}
+              <div class="pay-actions">
+                {#if currentMemberId && pay.to_user === currentMemberId}
+                  <button class="btn btn-sm btn-primary" onclick={() => handleConfirmPayment(pay.id)} use:haptic>Confirm</button>
+                {/if}
+                <button class="btn btn-sm btn-danger" onclick={() => handleCancelPayment(pay.id)} use:haptic>Cancel</button>
+              </div>
+            {/if}
+          </div>
+          <div class="swipe-action"></div>
         </div>
       {/each}
     {/if}
@@ -517,17 +660,39 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     {/if}
   {/if}
 {/if}
+  </div>
+</div>
+
+<!-- FAB -->
+{#if (activeTab === 'expenses' && !showExpForm) || (activeTab === 'payments' && !showPayForm)}
+  <button class="fab" onclick={toggleFabAction} use:haptic aria-label={fabLabel}>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  </button>
+{/if}
 
 {#if showShare && inviteLink}
   <ShareModal link={inviteLink} onClose={() => showShare = false} />
 {/if}
 
+<BottomSheet
+  show={confirmDialog.show}
+  title="Cancel Payment"
+  message="Are you sure you want to cancel this payment?"
+  variant="danger"
+  confirmText="Cancel Payment"
+  onConfirm={onConfirmCancel}
+  onCancel={() => confirmDialog = { show: false, payId: null }}
+/>
+
 <style>
   .detail-header {
     display: flex;
     align-items: flex-start;
-    gap: 0.75rem;
-    margin-bottom: 1.25rem;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
   }
 
   .detail-header-info {
@@ -538,11 +703,11 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   .detail-title {
     font-size: 1.25rem;
     font-weight: 700;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.375rem;
   }
 
   .section-actions {
-    margin-bottom: 1rem;
+    margin-bottom: 0.75rem;
   }
 
   .exp-meta {
@@ -571,29 +736,30 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.625rem;
   }
 
   .split-input {
     width: 120px;
     flex-shrink: 0;
+    min-height: var(--touch-target, 44px);
   }
 
   .split-warning {
     color: var(--text-warning, #d97706);
     font-size: 0.85rem;
-    margin-top: 0.25rem;
+    margin-bottom: 0.375rem;
     font-weight: 500;
   }
 
   .form-static-value {
     padding: 0.5rem 0.75rem;
-    background: var(--bg-muted, var(--bg));
+    background: var(--bg-primary, var(--bg));
     border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 0.9rem;
-    color: var(--text);
-    min-height: 38px;
+    color: var(--text-primary);
+    min-height: var(--touch-target, 44px);
     display: flex;
     align-items: center;
   }
@@ -662,5 +828,72 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   .bal-breakdown-amt.negative {
     color: var(--text-danger, #c0392b);
+  }
+
+  .swipe-container {
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 1rem;
+  }
+
+  .swipe-content {
+    position: relative;
+    z-index: 1;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    will-change: transform;
+  }
+
+  .swipe-action {
+    position: absolute;
+    right: 0;
+    top: 0;
+    height: 100%;
+  }
+
+  .detail-page {
+    position: relative;
+    overflow: hidden;
+    min-height: calc(100dvh - 5rem);
+  }
+
+  .detail-scroll {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    max-height: calc(100dvh - 5rem);
+  }
+
+  .fab {
+    position: fixed;
+    bottom: calc(1.5rem + var(--safe-bottom, 0px));
+    right: calc(1.5rem + var(--safe-right, 0px));
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--accent-dim, #1f6feb);
+    border: none;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 30;
+    transition: transform 0.15s, background 0.15s, box-shadow 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .fab:hover {
+    background: var(--accent, #58a6ff);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .fab:active {
+    transform: scale(0.92);
+  }
+
+  .fab svg {
+    display: block;
   }
 </style>
