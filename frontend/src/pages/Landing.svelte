@@ -46,6 +46,25 @@
     <h1 class="auth-title">I Owe You</h1>
     <p class="auth-subtitle">Group expense tracking</p>
 
+    {#if !result}
+      <div class="intro-card">
+        <div class="intro-steps">
+          <div class="intro-step">
+            <span class="intro-step-num">1</span>
+            <span class="intro-step-text">Create a group and share the invite link</span>
+          </div>
+          <div class="intro-step">
+            <span class="intro-step-num">2</span>
+            <span class="intro-step-text">Members join and add expenses</span>
+          </div>
+          <div class="intro-step">
+            <span class="intro-step-num">3</span>
+            <span class="intro-step-text">Settle up with payments — balances update automatically</span>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if result}
       <div class="result-section">
         <div class="alert alert-success">Group created!</div>
@@ -210,5 +229,42 @@
 
   .link-btn:hover {
     color: var(--accent-hover);
+  }
+
+  .intro-card {
+    margin-bottom: 1.25rem;
+    padding: 1rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .intro-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+
+  .intro-step {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  .intro-step-num {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
   }
 </style>
