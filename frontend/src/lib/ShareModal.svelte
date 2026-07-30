@@ -7,6 +7,7 @@
   let qrDataUrl = $state('');
   let copied = $state(false);
   let qrError = $state(false);
+  let previousFocus = null;
 
   async function copyLink() {
     try {
@@ -38,7 +39,47 @@
       e.preventDefault();
       onClose();
     }
+    if (e.key === 'Tab') {
+      const modal = document.querySelector('.modal');
+      if (!modal) return;
+      const focusable = modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      if (focusable.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
   }
+
+  $effect(() => {
+    previousFocus = document.activeElement;
+    requestAnimationFrame(() => {
+      const modal = document.querySelector('.modal');
+      if (modal) {
+        const focusable = modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        if (focusable.length > 0) {
+          focusable[0].focus();
+        }
+      }
+    });
+    return () => {
+      if (previousFocus && document.contains(previousFocus)) {
+        previousFocus.focus();
+      }
+    };
+  });
 
   onMount(async () => {
     try {

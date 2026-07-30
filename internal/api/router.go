@@ -61,6 +61,7 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 
 		r.Get("/api/groups/{slug}", GetGroup(s))
 		r.Patch("/api/groups/{slug}", UpdateGroup(s))
+		r.Delete("/api/groups/{slug}/members/me", LeaveGroup(s))
 
 		// Expenses
 		r.Post("/api/groups/{slug}/expenses", CreateExpense(s))
@@ -73,6 +74,7 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 		r.Post("/api/groups/{slug}/payments", CreatePayment(s))
 		r.Get("/api/groups/{slug}/payments", ListPayments(s))
 		r.Get("/api/payments/{id}", GetPayment(s))
+		r.Patch("/api/payments/{id}", UpdatePayment(s))
 		r.Post("/api/payments/{id}/confirm", ConfirmPayment(s))
 		r.Delete("/api/payments/{id}", CancelPayment(s))
 

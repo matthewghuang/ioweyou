@@ -228,6 +228,49 @@ func GetGroup(s *Server) http.HandlerFunc {
 	}
 }
 
+// LeaveGroup handles DELETE /api/groups/{slug}/members/me
+// Removes the authenticated member from the group's members table.
+func LeaveGroup(s *Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
+			respondError(w, 401, "unauthorized")
+			return
+		}
+
+		slug := chi.URLParam(r, "slug")
+		gid, err := resolveGroup(s.AuthDB, slug)
+		if err != nil {
+			respondError(w, 404, "group not found")
+			return
+		}
+
+		// Verify the member belongs to this group
+		if member.GroupID != gid {
+			respondError(w, 403, "not a member of this group")
+			return
+		}
+
+		// Delete the member
+		result, err := s.AuthDB.Exec(
+			`DELETE FROM members WHERE member_id = ? AND group_id = ?`,
+			member.MemberID, gid,
+		)
+		if err != nil {
+			respondError(w, 500, "failed to remove member")
+			return
+		}
+
+		rows, _ := result.RowsAffected()
+		if rows == 0 {
+			respondError(w, 404, "member not found")
+			return
+		}
+
+		respondOK(w, map[string]string{"status": "ok"})
+	}
+}
+
 // UpdateGroup handles PATCH /api/groups/{slug} (authenticated).
 func UpdateGroup(s *Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,6 @@
 <script>
-  import { currentGroupSlug } from '../lib/stores.js';
-  import { api, getToken, getGroupInfo } from '../lib/api.js';
+  import { currentGroupSlug, currentPage } from '../lib/stores.js';
+  import { api, getToken, getGroupInfo, setGroupInfo, clearAllTokens } from '../lib/api.js';
   import { createOp, getLocalOps, syncGroup, syncInProgress } from '../lib/sync.js';
   import { HLC } from '../lib/crdt.js';
   import { online, pendingOpsCount } from '../lib/networkStore.js';
@@ -26,6 +26,8 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
   let activeTab = $state('expenses');
   let showShare = $state(false);
   let inviteLink = $derived(slug ? `${window.location.origin}/group/${slug}` : '');
+  let renaming = $state(false);
+  let renameValue = $state('');
 
   // Expense form
   let showExpForm = $state(false);
@@ -34,6 +36,8 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
   let expSplitType = $state('equal');
   let expCustomSplits = $state([]);
 let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
+  let editingExpenseId = $state(null);  // the doc_id being edited, null = create mode
+  let editingPaymentId = $state(null);  // payment doc_id being edited, null = create mode
   let expCreating = $state(false);
   let expError = $state('');
 
@@ -78,6 +82,66 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     return Number(n || 0).toFixed(2);
   }
 
+  // ---- Rename handlers ----
+
+  function startRenaming() {
+    renameValue = group.name;
+    renaming = true;
+    setTimeout(() => {
+      const input = document.querySelector('.rename-input');
+      if (input) input.focus();
+    }, 0);
+  }
+
+  async function handleRenameSubmit(e) {
+    e.preventDefault();
+    if (!renameValue.trim() || renameValue.trim() === group.name) {
+      renaming = false;
+      return;
+    }
+
+    const token = getToken(slug);
+    if (!token) return;
+
+    try {
+      if (get(online)) {
+        await api.patch(`/api/groups/${slug}`, { name: renameValue.trim() }, token);
+        group = { ...group, name: renameValue.trim() };
+        const cachedInfo = getGroupInfo(slug);
+        if (cachedInfo) {
+          setGroupInfo(slug, { ...cachedInfo, name: renameValue.trim() });
+        }
+        showToast('Group renamed', 'success');
+      } else {
+        throw new Error('offline');
+      }
+    } catch (e) {
+      if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+        // Offline: create CRDT op locally
+        const timestamp = hlc.now();
+        const op = {
+          doc_id: group.internal_id || slug,
+          op_type: 'lww',
+          field: 'name',
+          value: JSON.stringify(renameValue.trim()),
+          author_id: currentMemberId,
+          timestamp,
+        };
+        await createOp(op, slug);
+        group = { ...group, name: renameValue.trim() };
+        const cachedInfo = getGroupInfo(slug);
+        if (cachedInfo) {
+          setGroupInfo(slug, { ...cachedInfo, name: renameValue.trim() });
+        }
+        showToast('Rename saved offline — will sync', 'info');
+      } else {
+        showToast('Failed to rename: ' + e.message, 'error');
+      }
+    }
+
+    renaming = false;
+  }
+
   // ---- Data loading ----
 
   async function loadAll() {
@@ -119,6 +183,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   // ---- Expense form ----
 
   function resetExpForm() {
+    editingExpenseId = null;
     expDesc = '';
     expAmt = 0;
     expSplitType = 'equal';
@@ -138,13 +203,103 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     }
   }
 
+  function startEditExpense(exp) {
+    editingExpenseId = exp.id;
+    expDesc = exp.description || '';
+    expAmt = Number(exp.amount || 0);
+    expSplitType = exp.split_type || 'equal';
+
+    if (expSplitType === 'custom' && exp.splits && exp.splits.length > 0) {
+      expCustomSplits = exp.splits.map(s => ({
+        user_id: s.user_id,
+        amount: Number(s.amount || 0),
+      }));
+    } else {
+      expCustomSplits = [];
+    }
+
+    expError = '';
+    showExpForm = true;
+  }
+
+  function splitEqually() {
+    const count = expCustomSplits.length;
+    if (count === 0) return;
+    const eachAmount = Math.floor((parseFloat(expAmt || 0) / count) * 100) / 100;
+    const remainder = Math.round((parseFloat(expAmt || 0) - eachAmount * count) * 100) / 100;
+    expCustomSplits = expCustomSplits.map((s, i) => ({
+      ...s,
+      amount: i === 0 ? eachAmount + remainder : eachAmount,
+    }));
+  }
+
+  function startEditPayment(pay) {
+    editingPaymentId = pay.id;
+    payTo = pay.to_user || '';
+    payAmt = Number(pay.amount || 0);
+    payMethod = pay.method || '';
+    payError = '';
+    showPayForm = true;
+  }
+
   async function handleCreateExpense(e) {
     e.preventDefault();
     expError = '';
     expCreating = true;
     const token = getToken(slug);
 
-    // CRDT ops for offline fallback
+    if (editingExpenseId) {
+      // ---- EDIT mode ----
+      try {
+        if (get(online)) {
+          const body = {
+            description: expDesc,
+            amount: parseFloat(expAmt),
+            split_type: expSplitType,
+          };
+          if (expSplitType === 'custom') {
+            body.splits = expCustomSplits
+              .filter(s => s.amount > 0)
+              .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+          }
+          await api.patch(`/api/expenses/${editingExpenseId}`, body, token);
+        } else {
+          throw new Error('offline');
+        }
+        // Success
+        editingExpenseId = null;
+        resetExpForm();
+        const [exps, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/expenses`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        expenses = exps;
+        balances = bals;
+        showToast('Expense updated', 'success');
+      } catch (e) {
+        if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+          // Offline: create CRDT ops for changed fields
+          const timestamp = hlc.now();
+          const ops = [];
+          ops.push({ doc_id: editingExpenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp });
+          ops.push({ doc_id: editingExpenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp });
+          ops.push({ doc_id: editingExpenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp });
+          for (const op of ops) {
+            await createOp(op, slug);
+          }
+          editingExpenseId = null;
+          resetExpForm();
+          showToast('Edit saved offline — will sync', 'info');
+        } else {
+          expError = e.message;
+        }
+      } finally {
+        expCreating = false;
+      }
+      return;
+    }
+
+    // ---- CREATE mode (existing code) ----
     const expenseId = crypto.randomUUID();
     const timestamp = hlc.now();
     const groupInfo = getGroupInfo(slug);
@@ -222,6 +377,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   // ---- Payment form ----
 
   function resetPayForm() {
+    editingPaymentId = null;
     payFrom = currentMemberId || '';
     payTo = '';
     payMethod = '';
@@ -236,7 +392,49 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     payCreating = true;
     const token = getToken(slug);
 
-    // CRDT ops for offline fallback
+    if (editingPaymentId) {
+      // ---- EDIT mode ----
+      try {
+        if (get(online)) {
+          const body = {
+            amount: parseFloat(payAmt),
+            method: payMethod || '',
+          };
+          await api.patch(`/api/payments/${editingPaymentId}`, body, token);
+        } else {
+          throw new Error('offline');
+        }
+        editingPaymentId = null;
+        resetPayForm();
+        const [pays, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/payments`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        payments = pays;
+        balances = bals;
+        showToast('Payment updated', 'success');
+      } catch (e) {
+        if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+          const timestamp = hlc.now();
+          const ops = [];
+          ops.push({ doc_id: editingPaymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp });
+          ops.push({ doc_id: editingPaymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp });
+          for (const op of ops) {
+            await createOp(op, slug);
+          }
+          editingPaymentId = null;
+          resetPayForm();
+          showToast('Edit saved offline — will sync', 'info');
+        } else {
+          payError = e.message;
+        }
+      } finally {
+        payCreating = false;
+      }
+      return;
+    }
+
+    // ---- CREATE mode (existing code) ----
     const paymentId = crypto.randomUUID();
     const timestamp = hlc.now();
     const groupInfo = getGroupInfo(slug);
@@ -271,7 +469,6 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       balances = bals;
     } catch (e) {
       if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
-        // Offline: queue CRDT ops
         for (const op of ops) {
           await createOp(op, slug);
         }
@@ -319,6 +516,30 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   async function handleDeleteExpense(expId) {
     confirmDialog = { show: true, payId: null, expId, action: 'deleteExpense' };
+  }
+
+  function handleLeaveGroup() {
+    confirmDialog = { show: true, payId: null, expId: null, action: 'leaveGroup' };
+  }
+
+  async function onConfirmLeaveGroup() {
+    const slugVal = slug;
+    confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' };
+    if (!slugVal) return;
+    const token = getToken(slugVal);
+    if (!token) return;
+
+    try {
+      await api.del(`/api/groups/${slugVal}/members/me`, token);
+      // Clean up local storage
+      clearAllTokens();
+      // Navigate back to landing
+      currentPage.set('landing');
+      history.pushState(null, '', '/');
+      showToast('Left group', 'info');
+    } catch (e) {
+      showToast('Failed to leave: ' + e.message, 'error');
+    }
   }
 
   async function onConfirmCancel() {
@@ -428,16 +649,40 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   <div class="detail-header">
     <button class="btn btn-sm" onclick={onBack} use:haptic>&larr; Back</button>
     <div class="detail-header-info">
-      <h2 class="detail-title">{group.name}</h2>
+      {#if renaming}
+        <form onsubmit={handleRenameSubmit} class="rename-form">
+          <div class="rename-row">
+            <input
+              use:scrollIntoViewOnFocus
+              class="form-input rename-input"
+              type="text"
+              bind:value={renameValue}
+              required
+              disabled={expCreating || payCreating}
+              autofocus
+              aria-label="Group name"
+            />
+            <button type="submit" class="btn btn-sm btn-primary" use:haptic aria-label="Save name">Save</button>
+            <button type="button" class="btn btn-sm" onclick={() => renaming = false} use:haptic aria-label="Cancel rename">Cancel</button>
+          </div>
+        </form>
+      {:else}
+        <div class="detail-title" role="button" tabindex="0" onclick={() => startRenaming()} onkeydown={(e) => e.key === 'Enter' && startRenaming()} title="Click to rename">
+          {group.name}
+        </div>
+      {/if}
       <div class="member-chips">
         {#each members as m}
           <span class="member-chip" title={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</span>
         {/each}
       </div>
     </div>
-    <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link" use:haptic>
-      Share
-    </button>
+    <div class="detail-header-actions">
+      <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link" use:haptic>
+        Share
+      </button>
+      <button class="btn btn-sm btn-danger-outline" onclick={handleLeaveGroup} use:haptic>Leave</button>
+    </div>
   </div>
 
   <!-- Tabs -->
@@ -465,14 +710,14 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   <!-- ==================== EXPENSES TAB ==================== -->
   {#if activeTab === 'expenses'}
     <div class="section-actions">
-      <button class="btn btn-primary btn-sm" onclick={() => showExpForm = !showExpForm} use:haptic>
+      <button class="btn btn-primary btn-sm" onclick={() => { showExpForm = !showExpForm; if (!showExpForm) editingExpenseId = null; }} use:haptic>
         {showExpForm ? 'Cancel' : '+ Add Expense'}
       </button>
     </div>
 
     {#if showExpForm}
       <div class="form-section">
-        <div class="form-section-title">New Expense</div>
+        <div class="form-section-title">{editingExpenseId ? 'Edit Expense' : 'New Expense'}</div>
         {#if expError}
           <div class="alert alert-error">{expError}</div>
         {/if}
@@ -511,13 +756,16 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
                 />
               </div>
             {/each}
+            <button type="button" class="btn btn-sm" onclick={splitEqually} use:haptic style="margin-top: 0.25rem;">
+              Split equally
+            </button>
             {#if Math.abs(expCustomSplitsSum - Number(expAmt)) > 0.005}
               <div class="split-warning">Split amounts sum (${fmt(expCustomSplitsSum)}) ≠ total (${fmt(expAmt)})</div>
             {/if}
           {/if}
 
           <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;" use:haptic>
-            {expCreating ? 'Adding…' : 'Add Expense'}
+            {expCreating ? (editingExpenseId ? 'Updating…' : 'Adding…') : (editingExpenseId ? 'Update Expense' : 'Add Expense')}
           </button>
         </form>
       </div>
@@ -531,7 +779,10 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           <div class="swipe-content card">
             <div class="card-header">
               <span class="card-title">{exp.description}</span>
-              <span class="amount">${fmt(exp.amount)}</span>
+              <div class="card-header-right">
+                <button class="btn btn-sm btn-edit" onclick={() => startEditExpense(exp)} use:haptic aria-label="Edit expense">Edit</button>
+                <span class="amount">${fmt(exp.amount)}</span>
+              </div>
             </div>
             <div class="exp-meta">
               <span class="badge">paid by {getMemberName(exp.paid_by)}</span>
@@ -562,14 +813,14 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   <!-- ==================== PAYMENTS TAB ==================== -->
   {:else if activeTab === 'payments'}
     <div class="section-actions">
-      <button class="btn btn-primary btn-sm" onclick={() => showPayForm = !showPayForm} use:haptic>
+      <button class="btn btn-primary btn-sm" onclick={() => { showPayForm = !showPayForm; if (!showPayForm) editingPaymentId = null; }} use:haptic>
         {showPayForm ? 'Cancel' : '+ Record Payment'}
       </button>
     </div>
 
     {#if showPayForm}
       <div class="form-section">
-        <div class="form-section-title">Record Payment</div>
+        <div class="form-section-title">{editingPaymentId ? 'Edit Payment' : 'Record Payment'}</div>
         {#if payError}
           <div class="alert alert-error">{payError}</div>
         {/if}
@@ -600,7 +851,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             </div>
           </div>
           <button class="btn btn-primary" type="submit" disabled={payCreating} use:haptic>
-            {payCreating ? 'Recording…' : 'Record Payment'}
+            {payCreating ? (editingPaymentId ? 'Updating…' : 'Recording…') : (editingPaymentId ? 'Update Payment' : 'Record Payment')}
           </button>
         </form>
       </div>
@@ -614,7 +865,12 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           <div class="swipe-content card">
             <div class="card-header">
               <span class="card-title">{getMemberName(pay.from_user)} &rarr; {getMemberName(pay.to_user)}</span>
-              <span class="amount">${fmt(pay.amount)}</span>
+              <div class="card-header-right">
+                {#if pay.status === 'pending' && pay.from_user === currentMemberId}
+                  <button class="btn btn-sm btn-edit" onclick={() => startEditPayment(pay)} use:haptic aria-label="Edit payment">Edit</button>
+                {/if}
+                <span class="amount">${fmt(pay.amount)}</span>
+              </div>
             </div>
             <div class="exp-meta">
               {#if pay.status === 'confirmed'}
@@ -705,11 +961,11 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
 <BottomSheet
   show={confirmDialog.show}
-  title={confirmDialog.action === 'deleteExpense' ? 'Delete Expense' : 'Cancel Payment'}
-  message={confirmDialog.action === 'deleteExpense' ? 'Are you sure you want to delete this expense?' : 'Are you sure you want to cancel this payment?'}
-  variant="danger"
-  confirmText={confirmDialog.action === 'deleteExpense' ? 'Delete' : 'Cancel Payment'}
-  onConfirm={onConfirmCancel}
+  title={confirmDialog.action === 'deleteExpense' ? 'Delete Expense' : confirmDialog.action === 'leaveGroup' ? 'Leave Group' : 'Cancel Payment'}
+  message={confirmDialog.action === 'deleteExpense' ? 'Are you sure you want to delete this expense?' : confirmDialog.action === 'leaveGroup' ? 'Are you sure you want to leave this group? You can rejoin with an invite link.' : 'Are you sure you want to cancel this payment?'}
+  variant={confirmDialog.action === 'leaveGroup' ? 'default' : 'danger'}
+  confirmText={confirmDialog.action === 'deleteExpense' ? 'Delete' : confirmDialog.action === 'leaveGroup' ? 'Leave Group' : 'Cancel Payment'}
+  onConfirm={confirmDialog.action === 'leaveGroup' ? onConfirmLeaveGroup : onConfirmCancel}
   onCancel={() => confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' }}
 />
 
@@ -726,14 +982,78 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     min-width: 0;
   }
 
+  .detail-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .btn-danger-outline {
+    background: transparent;
+    border: 1px solid var(--danger, #f85149);
+    color: var(--danger, #f85149);
+  }
+
+  .btn-danger-outline:hover {
+    background: var(--danger, #f85149);
+    color: #fff;
+  }
+
   .detail-title {
     font-size: 1.25rem;
     font-weight: 700;
     margin-bottom: 0.375rem;
+    cursor: pointer;
+  }
+
+  .detail-title:focus-visible {
+    outline: 2px solid var(--accent, #58a6ff);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  .rename-form {
+    margin-bottom: 0.375rem;
+  }
+
+  .rename-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .rename-input {
+    flex: 1;
+    font-size: 1.1rem;
+    font-weight: 700;
+    padding: 0.375rem 0.5rem;
+    min-height: auto;
   }
 
   .section-actions {
     margin-bottom: 0.75rem;
+  }
+
+  .card-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .btn-edit {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    min-height: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+  }
+
+  .btn-edit:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .exp-meta {

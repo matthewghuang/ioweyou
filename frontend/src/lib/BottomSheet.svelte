@@ -12,6 +12,8 @@
     onCancel,
   } = $props();
 
+  let previousFocus = null;
+
   function handleBackdrop(e) {
     if (e.target === e.currentTarget) {
       onCancel?.();
@@ -22,7 +24,49 @@
     if (e.key === 'Escape') {
       onCancel?.();
     }
+    if (e.key === 'Tab') {
+      const sheet = document.querySelector('.sheet');
+      if (!sheet) return;
+      const focusable = sheet.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+      if (focusable.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
   }
+
+  $effect(() => {
+    if (show) {
+      previousFocus = document.activeElement;
+      requestAnimationFrame(() => {
+        const sheet = document.querySelector('.sheet');
+        if (sheet) {
+          const focusable = sheet.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+          if (focusable.length > 0) {
+            focusable[0].focus();
+          }
+        }
+      });
+      return () => {
+        if (previousFocus && document.contains(previousFocus)) {
+          previousFocus.focus();
+        }
+      };
+    }
+  })
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
