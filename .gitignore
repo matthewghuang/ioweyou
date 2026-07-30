@@ -5,6 +5,7 @@ data.db-shm
 
 # Compiled binary
 /ioweyou
+server
 
 # Node artifacts (stray root installs)
 node_modules/
