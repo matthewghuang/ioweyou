@@ -108,13 +108,20 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 			absDir, _ := filepath.Abs(staticDir)
 			log.Printf("serving frontend from %s", absDir)
 
-			// Serve static assets directly
+			// Serve /assets/ files directly
 			r.Get("/assets/*", func(w http.ResponseWriter, r *http.Request) {
 				http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(absDir, "assets")))).ServeHTTP(w, r)
 			})
 
-			// All other non-API, non-WS routes → index.html (SPA fallback)
+			// All other requests (non-API, non-WS) — try real file first, then SPA fallback
 			r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+				// Check if the requested path matches a real file in the dist directory
+				filePath := filepath.Join(absDir, r.URL.Path)
+				if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+					http.ServeFile(w, r, filePath)
+					return
+				}
+				// SPA fallback for client-side routes
 				http.ServeFile(w, r, filepath.Join(absDir, "index.html"))
 			})
 		} else {
