@@ -109,7 +109,11 @@ export async function setGroupAuth(page, slug, token, groupInfo) {
  */
 export async function goToApp(page) {
   await page.goto('/');
-  await page.waitForLoadState('networkidle');
+  // Use 'load' instead of 'networkidle' because the SPA keeps
+  // a persistent WebSocket connection that would block 'networkidle' forever.
+  await page.waitForLoadState('load');
+  // Allow SPA to finish rendering
+  await page.waitForTimeout(500);
 }
 
 /**
@@ -119,7 +123,15 @@ export async function goToApp(page) {
  */
 export async function goToGroup(page, slug) {
   await page.goto(`/groups/${slug}`);
-  await page.waitForLoadState('networkidle');
+  // Use 'load' instead of 'networkidle' because the SPA keeps
+  // a persistent WebSocket connection that would block 'networkidle' forever.
+  await page.waitForLoadState('load');
+  // Wait for group data to load ("Loading group…" to disappear)
+  await page.waitForFunction(() => {
+    const el = document.querySelector('.empty-state');
+    return !el || !el.textContent.includes('Loading group');
+  }, { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(300);
 }
 
 // ─── UI interaction helpers ────────────────────────────────────────────────

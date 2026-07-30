@@ -20,7 +20,7 @@ test.describe('Group creation and joining', () => {
 
     // 1. Go to the landing page
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // 2. Fill in the creation form
     await page.waitForSelector('text=Create Group');
@@ -67,7 +67,7 @@ test.describe('Group creation and joining', () => {
     await page.evaluate(() => localStorage.clear());
     await page.goto(`/group/${slug}`);
     await page.goto(`/group/${slug}`);
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
 
     // 2. Should show the join form with the group info loaded
     await expectVisible(page, 'Join Group');
@@ -96,7 +96,7 @@ test.describe('Group creation and joining', () => {
     await page.waitForLoadState('domcontentloaded');
     await page.evaluate(() => localStorage.clear());
     await page.goto(`/group/${slug}`);
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('load');
     await expectVisible(page, groupName);
 
     // Fill Bob's name with WRONG password
