@@ -45,6 +45,7 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
   let expSplitType = $state('equal');
   let expCustomSplits = $state([]);
 let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
+  let expPctSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
   let editingExpenseId = $state(null);  // the doc_id being edited, null = create mode
   let editingPaymentId = $state(null);  // payment doc_id being edited, null = create mode
   let expCreating = $state(false);
@@ -178,7 +179,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       payments = pays;
       balances = bals;
       // If user selected custom split before members loaded, populate now
-      if (expSplitType === 'custom') {
+      if (expSplitType === 'custom' || expSplitType === 'percentage') {
         handleSplitTypeChange();
       }
     } catch (e) {
@@ -202,7 +203,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   }
 
   function handleSplitTypeChange() {
-    if (expSplitType === 'custom') {
+    if (expSplitType === 'custom' || expSplitType === 'percentage') {
       if (members.length === 0) return; // members not loaded yet; loadAll will populate
       const existing = new Map(expCustomSplits.map(s => [s.user_id, s.amount]));
       expCustomSplits = members.map(m => ({
@@ -218,7 +219,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     expAmt = Number(exp.amount || 0);
     expSplitType = exp.split_type || 'equal';
 
-    if (expSplitType === 'custom' && exp.splits && exp.splits.length > 0) {
+    if ((expSplitType === 'custom' || expSplitType === 'percentage') && exp.splits && exp.splits.length > 0) {
       expCustomSplits = exp.splits.map(s => ({
         user_id: s.user_id,
         amount: Number(s.amount || 0),
@@ -234,12 +235,22 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   function splitEqually() {
     const count = expCustomSplits.length;
     if (count === 0) return;
-    const eachAmount = Math.floor((parseFloat(expAmt || 0) / count) * 100) / 100;
-    const remainder = Math.round((parseFloat(expAmt || 0) - eachAmount * count) * 100) / 100;
-    expCustomSplits = expCustomSplits.map((s, i) => ({
-      ...s,
-      amount: i === 0 ? eachAmount + remainder : eachAmount,
-    }));
+
+    if (expSplitType === 'percentage') {
+      const each = Math.floor(100 / count);
+      const remainder = 100 - each * count;
+      expCustomSplits = expCustomSplits.map((s, i) => ({
+        ...s,
+        amount: i === 0 ? each + remainder : each,
+      }));
+    } else {
+      const eachAmount = Math.floor((parseFloat(expAmt || 0) / count) * 100) / 100;
+      const remainder = Math.round((parseFloat(expAmt || 0) - eachAmount * count) * 100) / 100;
+      expCustomSplits = expCustomSplits.map((s, i) => ({
+        ...s,
+        amount: i === 0 ? eachAmount + remainder : eachAmount,
+      }));
+    }
   }
 
   function startEditPayment(pay) {
@@ -266,10 +277,16 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             amount: parseFloat(expAmt),
             split_type: expSplitType,
           };
-          if (expSplitType === 'custom') {
+          if (expSplitType === 'custom' || expSplitType === 'percentage') {
             body.splits = expCustomSplits
               .filter(s => s.amount > 0)
-              .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+              .map(s => ({
+                user_id: s.user_id,
+                amount: expSplitType === 'percentage'
+                  ? Math.round((parseFloat(expAmt) * Number(s.amount) / 100) * 100) / 100
+                  : parseFloat(s.amount),
+              }));
+            body.split_type = 'custom';
           }
           await api.patch(`/api/expenses/${editingExpenseId}`, body, token);
         } else {
@@ -321,11 +338,14 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     ops.push({ doc_id: expenseId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp });
     ops.push({ doc_id: expenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp });
 
-    if (expSplitType === 'custom' && expCustomSplits.length > 0) {
+    if ((expSplitType === 'custom' || expSplitType === 'percentage') && expCustomSplits.length > 0) {
       for (const split of expCustomSplits.filter(s => s.amount > 0)) {
+        const splitAmount = expSplitType === 'percentage'
+          ? Math.round((parseFloat(expAmt) * Number(split.amount) / 100) * 100) / 100
+          : parseFloat(split.amount);
         ops.push({
           doc_id: expenseId, op_type: 'rga_insert', field: 'splits',
-          value: JSON.stringify({ user_id: split.user_id, amount: parseFloat(split.amount) }),
+          value: JSON.stringify({ user_id: split.user_id, amount: splitAmount }),
           item_id: crypto.randomUUID(), prev_item_id: '',
           author_id: currentMemberId, timestamp: hlc.now(),
         });
@@ -339,10 +359,16 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           amount: parseFloat(expAmt),
           split_type: expSplitType,
         };
-        if (expSplitType === 'custom') {
+        if (expSplitType === 'custom' || expSplitType === 'percentage') {
           body.splits = expCustomSplits
             .filter(s => s.amount > 0)
-            .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+            .map(s => ({
+              user_id: s.user_id,
+              amount: expSplitType === 'percentage'
+                ? Math.round((parseFloat(expAmt) * Number(s.amount) / 100) * 100) / 100
+                : parseFloat(s.amount),
+            }));
+          body.split_type = 'custom';
         }
         const created = await api.post(`/api/groups/${slug}/expenses`, body, token);
       } else {
@@ -387,8 +413,13 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           split_type: expSplitType,
           paid_by: currentMemberId,
           created_at: Date.now(),
-          splits: expSplitType === 'custom'
-            ? expCustomSplits.filter(s => s.amount > 0).map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }))
+          splits: (expSplitType === 'custom' || expSplitType === 'percentage')
+            ? expCustomSplits.filter(s => s.amount > 0).map(s => ({
+                user_id: s.user_id,
+                amount: expSplitType === 'percentage'
+                  ? Math.round((parseFloat(expAmt) * Number(s.amount) / 100) * 100) / 100
+                  : parseFloat(s.amount),
+              }))
             : [],
           _pending: true,
         };
@@ -781,6 +812,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
               <label class="form-label" for="exp-split">Split type</label>
               <select use:scrollIntoViewOnFocus id="exp-split" class="form-select" bind:value={expSplitType} disabled={expCreating} onchange={handleSplitTypeChange}>
                 <option value="equal">Equal</option>
+                <option value="percentage">Percentage</option>
                 <option value="custom">Custom</option>
               </select>
             </div>
@@ -810,7 +842,35 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             {/if}
           {/if}
 
-          <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;" use:haptic>
+          {#if expSplitType === 'percentage' && expCustomSplits.length > 0}
+            <div class="form-section-title" style="margin-top: 0.75rem;">Split percentages</div>
+            {#each expCustomSplits as split, i}
+              <div class="split-row">
+                <span class="uuid-short">{getMemberName(split.user_id)}</span>
+                <div class="pct-input-wrap">
+                  <input use:scrollIntoViewOnFocus
+                    class="form-input split-input"
+                    type="number"
+                    step="1"
+                    min="0"
+                    max="100"
+                    placeholder="0"
+                    bind:value={expCustomSplits[i].amount}
+                    disabled={expCreating}
+                  />
+                  <span class="pct-suffix">%</span>
+                </div>
+              </div>
+            {/each}
+            <button type="button" class="btn btn-sm" onclick={splitEqually} use:haptic style="margin-top: 0.25rem;">
+              Split equally
+            </button>
+            {#if Math.abs(expPctSum - 100) > 0.5}
+              <div class="split-warning">Percentages sum to {fmt(expPctSum)}% — must be 100%</div>
+            {/if}
+          {/if}
+
+          <button class="btn btn-primary" type="submit", disabled={expCreating} style="margin-top: 0.5rem;" use:haptic>
             {expCreating ? (editingExpenseId ? 'Updating…' : 'Adding…') : (editingExpenseId ? 'Update Expense' : 'Add Expense')}
           </button>
         </form>
@@ -1156,6 +1216,24 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     font-size: 0.85rem;
     margin-bottom: 0.375rem;
     font-weight: 500;
+  }
+
+  .pct-input-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .pct-input-wrap .split-input {
+    padding-right: 1.5rem;
+  }
+
+  .pct-suffix {
+    position: absolute;
+    right: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    pointer-events: none;
   }
 
   .form-static-value {
