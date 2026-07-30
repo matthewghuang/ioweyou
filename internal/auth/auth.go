@@ -50,7 +50,7 @@ func GenerateToken() (string, error) {
 }
 
 // GenerateSlug creates a human-readable slug from a group name.
-// Lowercases, replaces spaces with hyphens, strips non-alnum, appends 4 random hex chars.
+// Lowercases, replaces spaces with hyphens, strips non-alnum, appends 8 random hex chars.
 func GenerateSlug(name string) (string, error) {
 	var b strings.Builder
 	for _, r := range strings.ToLower(name) {
@@ -64,7 +64,7 @@ func GenerateSlug(name string) (string, error) {
 	if slug == "" {
 		slug = "group"
 	}
-	randSuffix := make([]byte, 2) // 4 hex chars
+	randSuffix := make([]byte, 4) // 8 hex chars
 	if _, err := rand.Read(randSuffix); err != nil {
 		return "", fmt.Errorf("rand: %w", err)
 	}

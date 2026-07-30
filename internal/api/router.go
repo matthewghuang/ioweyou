@@ -36,13 +36,29 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 	// CORS
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Group-Token")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Group-Token, Authorization")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(204)
 				return
 			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// CSP
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; "+
+					"script-src 'self'; "+
+					"style-src 'self' 'unsafe-inline'; "+
+					"connect-src 'self' ws: wss:; "+
+					"img-src 'self' data:; "+
+					"font-src 'self'; "+
+					"frame-ancestors 'none'; "+
+					"base-uri 'self'")
 			next.ServeHTTP(w, r)
 		})
 	})

@@ -119,7 +119,30 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
   }
 
   let loadGen = 0;
-  let hlc = new HLC();
+  function createPersistentHLC() {
+    const saved = localStorage.getItem('ioweyou_hlc');
+    if (saved) {
+      try {
+        const state = JSON.parse(saved);
+        const h = new HLC();
+        h.wall_time = state.wall_time;
+        h.logical = state.logical;
+        return h;
+      } catch {}
+    }
+    return new HLC();
+  }
+
+  let hlc = createPersistentHLC();
+
+  $effect(() => {
+    return () => {
+      localStorage.setItem('ioweyou_hlc', JSON.stringify({
+        wall_time: hlc.wall_time,
+        logical: hlc.logical,
+      }));
+    };
+  });
 
   // ---- Helpers ----
 
@@ -398,6 +421,8 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
       }
     }
 
+    let createdExpenseId = null;
+
     try {
       if (get(online)) {
         const body = {
@@ -416,7 +441,8 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
             }));
           body.split_type = 'custom';
         }
-        const created = await api.post(`/api/groups/${slug}/expenses`, body, token);
+        const response = await api.post(`/api/groups/${slug}/expenses`, body, token);
+        createdExpenseId = response.id;
       } else {
         throw new Error('offline');
       }
@@ -433,7 +459,8 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
           const token = getToken(slug);
           if (!token) return;
           try {
-            await api.del(`/api/expenses/${created.id}`, token);
+            if (!createdExpenseId) return;
+            await api.del(`/api/expenses/${createdExpenseId}`, token);
             const [exps, bals] = await Promise.all([
               api.get(`/api/groups/${slug}/expenses`, token),
               api.get(`/api/groups/${slug}/balances`, token),

@@ -24,6 +24,10 @@ func NewSQLiteStateStore(dbPath string) (*SQLiteStateStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	// SQLite only supports one writer at a time
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
 	return &SQLiteStateStore{db: db}, nil
 }
 
