@@ -344,7 +344,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             .filter(s => s.amount > 0)
             .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
         }
-        await api.post(`/api/groups/${slug}/expenses`, body, token);
+        const created = await api.post(`/api/groups/${slug}/expenses`, body, token);
       } else {
         throw new Error('offline');
       }
@@ -355,6 +355,25 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       ]);
       expenses = exps;
       balances = bals;
+      showToast('Expense added', 'success', 5000, {
+        label: 'Undo',
+        onClick: async () => {
+          const token = getToken(slug);
+          if (!token) return;
+          try {
+            await api.del(`/api/expenses/${created.id}`, token);
+            const [exps, bals] = await Promise.all([
+              api.get(`/api/groups/${slug}/expenses`, token),
+              api.get(`/api/groups/${slug}/balances`, token),
+            ]);
+            expenses = exps;
+            balances = bals;
+            showToast('Expense undone', 'info');
+          } catch {
+            showToast('Could not undo', 'error');
+          }
+        },
+      });
     } catch (e) {
       if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
         // Offline: queue CRDT ops
@@ -375,6 +394,13 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
         };
         expenses = [...expenses, newExpense];
         resetExpForm();
+        showToast('Expense added', 'success', 5000, {
+          label: 'Undo',
+          onClick: () => {
+            expenses = expenses.filter(e => e.id !== expenseId);
+            showToast('Expense undone', 'info');
+          },
+        });
       } else {
         expError = e.message;
       }

@@ -1,9 +1,16 @@
 <script>
   import { dismissToast } from './toastStore.js';
 
-  let { id, message, type = 'info', duration = 3000 } = $props();
+  let { id, message, type = 'info', duration = 3000, action = null } = $props();
 
   let hiding = $state(false);
+
+  function handleAction() {
+    if (action) {
+      action.onClick();
+    }
+    handleDismiss();
+  }
 
   function handleDismiss() {
     hiding = true;
@@ -23,6 +30,9 @@
 {#if !hiding}
   <div class="toast toast-{type}" role="alert">
     <span class="toast-message">{message}</span>
+    {#if action}
+      <button class="toast-action" onclick={handleAction}>{action.label}</button>
+    {/if}
     <button class="toast-close" onclick={handleDismiss} aria-label="Close">&times;</button>
   </div>
 {/if}
@@ -67,6 +77,24 @@
     flex: 1;
     min-width: 0;
     word-break: break-word;
+  }
+
+  .toast-action {
+    flex-shrink: 0;
+    background: var(--accent-dim, #1f6feb);
+    border: none;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    padding: 0.25rem 0.625rem;
+    border-radius: var(--radius-sm, 4px);
+    min-height: 32px;
+    white-space: nowrap;
+  }
+
+  .toast-action:hover {
+    background: var(--accent, #58a6ff);
   }
 
   .toast-close {
