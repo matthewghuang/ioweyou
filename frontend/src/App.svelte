@@ -110,9 +110,15 @@
     currentPage.set('groups');
   }
 
-  function handleJoinGroup() {
-    history.pushState(null, '', '/groups');
-    currentPage.set('groups');
+  function handleJoinGroup(data) {
+    if (data && data.slug) {
+      currentGroupSlug.set(data.slug);
+      history.pushState(null, '', `/groups/${data.slug}`);
+      currentPage.set('group');
+    } else {
+      history.pushState(null, '', '/groups');
+      currentPage.set('groups');
+    }
   }
 
   function handleSelectGroup(slug) {
