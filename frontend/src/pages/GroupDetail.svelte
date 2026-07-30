@@ -924,7 +924,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     {#if expenses.length === 0}
       <div class="empty-state">No expenses yet.</div>
     {:else}
-      {#each expenses as exp}
+      {#each [...expenses].sort((a, b) => (b.created_at || 0) - (a.created_at || 0)) as exp}
         <div class="swipe-container" use:swipeReveal={{ onAction: () => handleDeleteExpense(exp.id), actionLabel: 'Delete', actionVariant: 'danger' }}>
           <div class="swipe-content card">
             <div class="card-header">
@@ -1010,7 +1010,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     {#if payments.length === 0}
       <div class="empty-state">No payments recorded yet.</div>
     {:else}
-      {#each payments as pay}
+      {#each [...payments].sort((a, b) => (b.created_at || 0) - (a.created_at || 0)) as pay}
         <div class="swipe-container" use:swipeReveal={{ onAction: () => handleCancelPayment(pay.id), actionLabel: 'Cancel', actionVariant: 'danger' }}>
           <div class="swipe-content card">
             <div class="card-header">
