@@ -47,7 +47,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   let payError = $state('');
 
   let currentMemberId = $state(null);
-  let confirmDialog = $state({ show: false, payId: null });
+  let confirmDialog = $state({ show: false, payId: null, expId: null, action: 'cancelPayment' });
   let fabLabel = $derived(activeTab === 'expenses' ? 'Add expense' : 'Record payment');
 
   function toggleFabAction() {
@@ -314,25 +314,48 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   }
 
   async function handleCancelPayment(payId) {
-    confirmDialog = { show: true, payId };
+    confirmDialog = { show: true, payId, expId: null, action: 'cancelPayment' };
+  }
+
+  async function handleDeleteExpense(expId) {
+    confirmDialog = { show: true, payId: null, expId, action: 'deleteExpense' };
   }
 
   async function onConfirmCancel() {
-    const payId = confirmDialog.payId;
-    confirmDialog = { show: false, payId: null };
-    if (!payId) return;
-    const token = getToken(slug);
-    try {
-      await api.del(`/api/payments/${payId}`, token);
-      const [pays, bals] = await Promise.all([
-        api.get(`/api/groups/${slug}/payments`, token),
-        api.get(`/api/groups/${slug}/balances`, token),
-      ]);
-      payments = pays;
-      balances = bals;
-      showToast('Payment cancelled', 'info');
-    } catch (e) {
-      showToast('Failed to cancel: ' + e.message, 'error');
+    if (confirmDialog.action === 'cancelPayment') {
+      const payId = confirmDialog.payId;
+      confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' };
+      if (!payId) return;
+      const token = getToken(slug);
+      try {
+        await api.del(`/api/payments/${payId}`, token);
+        const [pays, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/payments`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        payments = pays;
+        balances = bals;
+        showToast('Payment cancelled', 'info');
+      } catch (e) {
+        showToast('Failed to cancel: ' + e.message, 'error');
+      }
+    } else if (confirmDialog.action === 'deleteExpense') {
+      const expId = confirmDialog.expId;
+      confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' };
+      if (!expId) return;
+      const token = getToken(slug);
+      try {
+        await api.del(`/api/expenses/${expId}`, token);
+        const [exps, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/expenses`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        expenses = exps;
+        balances = bals;
+        showToast('Expense deleted', 'success');
+      } catch (e) {
+        showToast('Failed to delete: ' + e.message, 'error');
+      }
     }
   }
 
@@ -504,7 +527,8 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       <div class="empty-state">No expenses yet.</div>
     {:else}
       {#each expenses as exp}
-          <div class="card">
+        <div class="swipe-container" use:swipeReveal={{ onAction: () => handleDeleteExpense(exp.id), actionLabel: 'Delete', actionVariant: 'danger' }}>
+          <div class="swipe-content card">
             <div class="card-header">
               <span class="card-title">{exp.description}</span>
               <span class="amount">${fmt(exp.amount)}</span>
@@ -530,6 +554,8 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
               </div>
             {/if}
           </div>
+          <div class="swipe-action"></div>
+        </div>
       {/each}
     {/if}
 
@@ -679,12 +705,12 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
 <BottomSheet
   show={confirmDialog.show}
-  title="Cancel Payment"
-  message="Are you sure you want to cancel this payment?"
+  title={confirmDialog.action === 'deleteExpense' ? 'Delete Expense' : 'Cancel Payment'}
+  message={confirmDialog.action === 'deleteExpense' ? 'Are you sure you want to delete this expense?' : 'Are you sure you want to cancel this payment?'}
   variant="danger"
-  confirmText="Cancel Payment"
+  confirmText={confirmDialog.action === 'deleteExpense' ? 'Delete' : 'Cancel Payment'}
   onConfirm={onConfirmCancel}
-  onCancel={() => confirmDialog = { show: false, payId: null }}
+  onCancel={() => confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' }}
 />
 
 <style>
