@@ -25,14 +25,27 @@ End-to-end tests for the I Owe You frontend, covering the core user flows:
    cd frontend && npx playwright install chromium
    ```
 
+   For mobile tests (Mobile Safari / iPhone 14), install WebKit as well:
+   ```bash
+   cd frontend && npx playwright install webkit
+   ```
+
 ## Running
+
+Tests run against **Desktop Chrome** and **Mobile Safari (iPhone 14)** by default.
 
 ```bash
 cd frontend
-npx playwright test          # headless
+npx playwright test          # headless, all projects
 npx playwright test --headed # with visible browser
 npx playwright test --ui     # Playwright UI mode
 npx playwright test --debug  # debug mode
+```
+
+To run tests for a specific project:
+```bash
+npx playwright test --project="chromium"
+npx playwright test --project="Mobile Safari"
 ```
 
 ## Configuration
