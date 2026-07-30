@@ -1,6 +1,6 @@
 <script>
   import { currentGroupSlug, currentPage } from '../lib/stores.js';
-  import { api, getToken, getGroupInfo, setGroupInfo, clearAllTokens } from '../lib/api.js';
+  import { api, getToken, getGroupInfo, setGroupInfo, clearAllTokens, clearGroupData } from '../lib/api.js';
   import { createOp, getLocalOps, syncGroup, syncInProgress } from '../lib/sync.js';
   import { HLC } from '../lib/crdt.js';
   import { online, pendingOpsCount } from '../lib/networkStore.js';
@@ -541,7 +541,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     try {
       await api.del(`/api/groups/${slugVal}/members/me`, token);
       // Clean up local storage
-      clearAllTokens();
+      clearGroupData(slugVal);
       // Navigate back to landing
       currentPage.set('landing');
       history.pushState(null, '', '/');
