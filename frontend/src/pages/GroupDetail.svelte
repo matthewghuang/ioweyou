@@ -90,6 +90,8 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
   let expCustomSplits = $state([]);
 let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
   let expPctSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
+let totalExpenses = $derived(expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0));
+let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').reduce((sum, p) => sum + Number(p.amount || 0), 0));
   let editingExpenseId = $state(null);  // the doc_id being edited, null = create mode
   let editingPaymentId = $state(null);  // payment doc_id being edited, null = create mode
   let expCreating = $state(false);
@@ -836,6 +838,13 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       </button>
     </div>
 
+    {#if expenses.length > 0}
+      <div class="total-bar">
+        <span class="total-label">Total expenses</span>
+        <span class="total-amount">${totalExpenses.toFixed(2)}</span>
+      </div>
+    {/if}
+
     {#if showExpForm}
       <div class="form-section">
         <div class="form-section-title">{editingExpenseId ? 'Edit Expense' : 'New Expense'}</div>
@@ -967,6 +976,13 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
         {showPayForm ? 'Cancel' : '+ Record Payment'}
       </button>
     </div>
+
+    {#if payments.length > 0}
+      <div class="total-bar">
+        <span class="total-label">Total payments (confirmed)</span>
+        <span class="total-amount">${totalPayments.toFixed(2)}</span>
+      </div>
+    {/if}
 
     {#if showPayForm}
       <div class="form-section">
@@ -1502,5 +1518,27 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   .fab svg {
     display: block;
+  }
+
+  .total-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .total-label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .total-amount {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
   }
 </style>
