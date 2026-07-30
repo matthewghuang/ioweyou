@@ -26,6 +26,15 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
   let activeTab = $state('expenses');
   let showShare = $state(false);
   let inviteLink = $derived(slug ? `${window.location.origin}/group/${slug}` : '');
+  let netBalance = $derived.by(() => {
+    if (!balances || !currentMemberId) return null;
+    let net = 0;
+    for (const entry of balances) {
+      if (entry.to === currentMemberId) net += entry.amount;
+      if (entry.from === currentMemberId) net -= entry.amount;
+    }
+    return net;
+  });
   let renaming = $state(false);
   let renameValue = $state('');
 
@@ -676,6 +685,17 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           <span class="member-chip" title={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</span>
         {/each}
       </div>
+      <div class="header-balance">
+        {#if netBalance !== null}
+          {#if netBalance > 0}
+            <span class="badge badge-success">You're owed ${netBalance.toFixed(2)}</span>
+          {:else if netBalance < 0}
+            <span class="badge badge-warning">You owe ${Math.abs(netBalance).toFixed(2)}</span>
+          {:else}
+            <span class="badge balance-settled">Settled</span>
+          {/if}
+        {/if}
+      </div>
     </div>
     <div class="detail-header-actions">
       <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link" use:haptic>
@@ -987,6 +1007,20 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     align-items: center;
     gap: 0.5rem;
     flex-shrink: 0;
+  }
+
+  .header-balance {
+    margin-top: 0.375rem;
+  }
+
+  .header-balance .badge {
+    font-size: 0.8rem;
+  }
+
+  .balance-settled {
+    background: rgba(63, 185, 80, 0.1);
+    color: var(--success, #3fb950);
+    border-color: rgba(63, 185, 80, 0.2);
   }
 
   .btn-danger-outline {
