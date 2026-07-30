@@ -35,6 +35,50 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
     }
     return net;
   });
+  let spendingSummary = $derived.by(() => {
+    if (!expenses || !members || members.length === 0) return [];
+    
+    const paidBy = {};  // member_id -> total paid
+    const owesBy = {};  // member_id -> total owed (split share)
+    
+    for (const exp of expenses) {
+      // Skip tombstoned expenses
+      if (exp.tombstone) continue;
+      
+      const amount = Number(exp.amount || 0);
+      const payer = exp.paid_by;
+      
+      paidBy[payer] = (paidBy[payer] || 0) + amount;
+      
+      // Calculate what each person owes from splits
+      if (exp.splits && exp.splits.length > 0) {
+        // Custom/percentage splits
+        for (const split of exp.splits) {
+          const splitAmount = Number(split.amount || 0);
+          owesBy[split.user_id] = (owesBy[split.user_id] || 0) + splitAmount;
+        }
+      } else {
+        // Equal split: distribute among all members
+        const share = amount / members.length;
+        for (const m of members) {
+          owesBy[m.id] = (owesBy[m.id] || 0) + share;
+        }
+      }
+    }
+    
+    return members.map(m => {
+      const paid = paidBy[m.id] || 0;
+      const owes = owesBy[m.id] || 0;
+      return {
+        name: m.name,
+        id: m.id,
+        paid,
+        owes,
+        net: paid - owes,
+        isYou: m.id === currentMemberId,
+      };
+    }).sort((a, b) => b.net - a.net);  // most positive (owed) first
+  });
   let renaming = $state(false);
   let renameValue = $state('');
 
@@ -1010,6 +1054,29 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   <!-- ==================== BALANCES TAB ==================== -->
   {:else if activeTab === 'balances'}
+    {#if spendingSummary.length > 0}
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Spending Summary</span>
+        </div>
+        <div class="spending-list">
+          {#each spendingSummary as person}
+            <div class="spending-row" class:spending-you={person.isYou}>
+              <div class="spending-name">
+                {person.name}{person.isYou ? ' (you)' : ''}
+              </div>
+              <div class="spending-numbers">
+                <span class="spending-paid">Paid ${person.paid.toFixed(2)}</span>
+                <span class="spending-owes">Owes ${person.owes.toFixed(2)}</span>
+              </div>
+              <div class="spending-net" class:amount-positive={person.net >= 0} class:amount-negative={person.net < 0}>
+                {person.net >= 0 ? '+' : ''}${person.net.toFixed(2)}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
     {#if balances.length === 0}
       <div class="empty-state">
         <p>All balanced up!</p>
@@ -1312,6 +1379,62 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   .bal-breakdown-amt.negative {
     color: var(--text-danger, #c0392b);
+  }
+
+  .spending-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .spending-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.625rem 0;
+    border-bottom: 1px solid var(--border);
+    gap: 0.5rem;
+  }
+
+  .spending-row:last-child {
+    border-bottom: none;
+  }
+
+  .spending-you {
+    background: rgba(88, 166, 255, 0.04);
+    margin: 0 -1.25rem;
+    padding: 0.625rem 1.25rem;
+  }
+
+  .spending-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    min-width: 80px;
+  }
+
+  .spending-numbers {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    text-align: right;
+    flex: 1;
+  }
+
+  .spending-paid {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .spending-owes {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .spending-net {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 1rem;
+    min-width: 80px;
+    text-align: right;
   }
 
   .swipe-container {
