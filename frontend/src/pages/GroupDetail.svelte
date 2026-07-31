@@ -12,6 +12,7 @@ import { swipeBack, pullToRefresh, swipeReveal } from '../lib/gestures.js';
   import BottomSheet from '../lib/BottomSheet.svelte';
   import { showToast } from '../lib/toastStore.js';
 import { scrollIntoViewOnFocus } from '../lib/forms.js';
+  import { uid } from '../lib/uuid.js';
 
   let { onBack } = $props();
 
@@ -425,7 +426,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
     }
 
     // ---- CREATE mode (existing code) ----
-    const expenseId = crypto.randomUUID();
+    const expenseId = uid();
     const groupInfo = getGroupInfo(slug);
     const groupId = groupInfo?.internal_id || slug;
 
@@ -447,7 +448,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
         ops.push({
           doc_id: expenseId, op_type: 'rga_insert', field: 'splits',
           value: JSON.stringify({ user_id: split.user_id, amount: splitAmount }),
-          item_id: crypto.randomUUID(), prev_item_id: '',
+          item_id: uid(), prev_item_id: '',
           author_id: currentMemberId, timestamp: hlc.now(),
         });
       }
@@ -608,7 +609,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
     }
 
     // ---- CREATE mode (existing code) ----
-    const paymentId = crypto.randomUUID();
+    const paymentId = uid();
     const groupInfo = getGroupInfo(slug);
     const groupId = groupInfo?.internal_id || slug;
 
