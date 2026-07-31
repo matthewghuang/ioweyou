@@ -65,14 +65,22 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   // ---- Data loading ----
 
-  async function loadAll() {
+  // silent: background refresh (e.g. WS change) — never flips `loading` (which
+  // swaps the whole page for the spinner) and never replaces healthy data with
+  // an error on a transient fetch failure.
+  async function loadAll(opts = {}) {
+    const silent = !!opts.silent;
     if (!slug) return;
-    error = '';
-    loading = true;
+    if (!silent) {
+      error = '';
+      loading = true;
+    }
     const token = getToken(slug);
     if (!token) {
-      error = 'Not authenticated for this group';
-      loading = false;
+      if (!silent) {
+        error = 'Not authenticated for this group';
+        loading = false;
+      }
       return;
     }
     const gen = ++loadGen;
@@ -84,6 +92,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
         api.get(`/api/groups/${slug}/balances`, token),
       ]);
       if (gen !== loadGen) return; // stale response, ignore
+      error = ''; // fresh data supersedes any prior error
       group = g;
       members = g.members || [];
       expenses = exps;
@@ -95,7 +104,9 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       }
     } catch (e) {
       if (gen !== loadGen) return; // stale error
-      error = e.message;
+      // Background refresh failed: keep the last good data on screen;
+      // only a foreground load surfaces the error.
+      if (!silent) error = e.message;
     } finally {
       if (gen === loadGen) loading = false;
     }
@@ -253,7 +264,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       subscribe(info.internal_id);
     }
     setOnUpdate(() => {
-      loadAll();
+      loadAll({ silent: true });
     });
 
     return () => {
