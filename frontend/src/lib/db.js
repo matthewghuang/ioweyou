@@ -31,15 +31,29 @@ export function openDb() {
   });
 }
 
+// The 'ops' store keys on ['doc_id', 'author_id', 'wall_time', 'logical'],
+// but operations carry their clock inside a nested `timestamp` object (matching
+// the API wire format). Flatten the clock onto the record for the key path and
+// restore the nested shape when reading back.
+function normalizeStored(op, groupSlug) {
+  return { ...op, wall_time: op.timestamp.wall_time, logical: op.timestamp.logical, group_slug: groupSlug };
+}
+
+function denormalizeStored(rec) {
+  const { wall_time, logical, group_slug, ...rest } = rec;
+  return { ...rest, timestamp: { wall_time, logical } };
+}
+
 /**
  * Store a single CRDT operation. Idempotent — uses put with the compound key.
  * @param {object} op
+ * @param {string} [groupSlug] — group scope, used to find ops for offline sync
  * @returns {Promise<void>}
  */
-export async function addOp(op) {
+export async function addOp(op, groupSlug) {
   const db = await openDb();
   const tx = db.transaction('ops', 'readwrite');
-  tx.objectStore('ops').put(op);
+  tx.objectStore('ops').put(normalizeStored(op, groupSlug));
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -50,15 +64,16 @@ export async function addOp(op) {
 /**
  * Store multiple CRDT operations in a single transaction.
  * @param {object[]} ops
+ * @param {string} [groupSlug] — group scope, used to find ops for offline sync
  * @returns {Promise<void>}
  */
-export async function addOps(ops) {
+export async function addOps(ops, groupSlug) {
   if (ops.length === 0) return;
   const db = await openDb();
   const tx = db.transaction('ops', 'readwrite');
   const store = tx.objectStore('ops');
   for (const op of ops) {
-    store.put(op);
+    store.put(normalizeStored(op, groupSlug));
   }
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -68,7 +83,7 @@ export async function addOps(ops) {
 }
 
 /**
- * Get all stored operations. Optionally filter by group slug prefix match on doc_id.
+ * Get all stored operations, optionally scoped to a group.
  * @param {string} [groupSlug]
  * @returns {Promise<object[]>}
  */
@@ -76,40 +91,36 @@ export async function getOps(groupSlug) {
   const db = await openDb();
   const tx = db.transaction('ops', 'readonly');
   const store = tx.objectStore('ops');
-  let request;
-  if (groupSlug) {
-    request = store.getAll(
-      IDBKeyRange.bound([groupSlug], [groupSlug + '\uffff'])
-    );
-  } else {
-    request = store.getAll();
-  }
+  const request = store.getAll();
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const records = request.result;
+      const scoped = groupSlug ? records.filter((r) => r.group_slug === groupSlug) : records;
+      resolve(scoped.map(denormalizeStored));
+    };
     request.onerror = () => reject(request.error);
   });
 }
 
 /**
- * Delete all operations whose doc_id starts with the given group slug.
- * @param {string} groupSlug
+ * Delete all stored operations for a group (or all groups when slug is omitted).
+ * @param {string} [groupSlug]
  * @returns {Promise<void>}
  */
 export async function clearOps(groupSlug) {
   const db = await openDb();
   const tx = db.transaction('ops', 'readwrite');
   const store = tx.objectStore('ops');
-  const range = IDBKeyRange.bound([groupSlug], [groupSlug + '\uffff']);
   return new Promise((resolve, reject) => {
-    const cursorReq = store.openCursor(range);
-    cursorReq.onsuccess = (event) => {
-      const cursor = event.target.result;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
+    const req = store.getAll();
+    req.onsuccess = () => {
+      for (const rec of req.result) {
+        if (!groupSlug || rec.group_slug === groupSlug) {
+          store.delete([rec.doc_id, rec.author_id, rec.wall_time, rec.logical]);
+        }
       }
     };
-    cursorReq.onerror = () => reject(cursorReq.error);
+    req.onerror = () => reject(req.error);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);

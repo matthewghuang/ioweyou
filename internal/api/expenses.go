@@ -196,14 +196,24 @@ func ListExpenses(s *Server) http.HandlerFunc {
 			respondError(w, 500, "db error")
 			return
 		}
-		defer rows.Close()
-
-		var expenses []map[string]any
+		// Collect doc_ids first and release the query before reading states:
+		// the store shares one SQLite connection, so holding rows open while
+		// calling GetLatestState would deadlock the pool.
+		var docIDs []string
 		for rows.Next() {
 			var docID string
-			if err := rows.Scan(&docID); err != nil {
-				continue
+			if rows.Scan(&docID) == nil {
+				docIDs = append(docIDs, docID)
 			}
+		}
+		if err := rows.Err(); err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		rows.Close()
+
+		var expenses []map[string]any
+		for _, docID := range docIDs {
 			state, err := s.Store.GetLatestState(docID)
 			if err != nil || len(state) == 0 {
 				continue
@@ -218,10 +228,6 @@ func ListExpenses(s *Server) http.HandlerFunc {
 			}
 			state["id"] = docID
 			expenses = append(expenses, state)
-		}
-		if err := rows.Err(); err != nil {
-			respondError(w, 500, "db error")
-			return
 		}
 		if expenses == nil {
 			expenses = []map[string]any{}

@@ -125,6 +125,10 @@ func (c *WSClient) readPump() {
 				c.hlc.Observe(op.Timestamp)
 			}
 
+			// Ops arrive with value as a JSON string; recover the raw value
+			// before group resolution and insertion.
+			normalizePushedOps(msg.Operations)
+
 			// Verify group membership before inserting.
 			groupSet := make(map[string]bool)
 			for _, op := range msg.Operations {

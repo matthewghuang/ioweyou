@@ -386,14 +386,21 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
       } catch (e) {
         if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
           // Offline: create CRDT ops for changed fields
-          const timestamp = hlc.now();
-          const ops = [];
-          ops.push({ doc_id: editingExpenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp });
-          ops.push({ doc_id: editingExpenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp });
-          ops.push({ doc_id: editingExpenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp });
+          const ops = [
+            { doc_id: editingExpenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp: hlc.now() },
+            { doc_id: editingExpenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp: hlc.now() },
+            { doc_id: editingExpenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp: hlc.now() },
+          ];
           for (const op of ops) {
             await createOp(op, slug);
           }
+          // Reflect the edit locally with a pending marker until the sync
+          // replaces the list from the server.
+          expenses = expenses.map((exp) =>
+            exp.id === editingExpenseId
+              ? { ...exp, description: expDesc, amount: parseFloat(expAmt), split_type: expSplitType, _pending: true }
+              : exp,
+          );
           editingExpenseId = null;
           resetExpForm();
           showToast('Edit saved offline — will sync', 'info');
@@ -408,16 +415,18 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
 
     // ---- CREATE mode (existing code) ----
     const expenseId = crypto.randomUUID();
-    const timestamp = hlc.now();
     const groupInfo = getGroupInfo(slug);
     const groupId = groupInfo?.internal_id || slug;
 
+    // Each op needs its own HLC timestamp: the server (and the local
+    // IndexedDB key) is UNIQUE on (doc_id, author_id, wall_time, logical),
+    // so reusing one timestamp across the batch silently drops ops.
     const ops = [];
-    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp });
-    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp });
-    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'paid_by', value: JSON.stringify(currentMemberId), author_id: currentMemberId, timestamp });
-    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp });
-    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'paid_by', value: JSON.stringify(currentMemberId), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp: hlc.now() });
 
     if ((expSplitType === 'custom' || expSplitType === 'percentage') && expCustomSplits.length > 0) {
       for (const split of expCustomSplits.filter(s => s.amount > 0)) {
@@ -561,13 +570,20 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
         showToast('Payment updated', 'success');
       } catch (e) {
         if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
-          const timestamp = hlc.now();
-          const ops = [];
-          ops.push({ doc_id: editingPaymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp });
-          ops.push({ doc_id: editingPaymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp });
+          const ops = [
+            { doc_id: editingPaymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp: hlc.now() },
+            { doc_id: editingPaymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp: hlc.now() },
+          ];
           for (const op of ops) {
             await createOp(op, slug);
           }
+          // Reflect the edit locally with a pending marker until the sync
+          // replaces the list from the server.
+          payments = payments.map((pay) =>
+            pay.id === editingPaymentId
+              ? { ...pay, amount: parseFloat(payAmt), method: payMethod || '', _pending: true }
+              : pay,
+          );
           editingPaymentId = null;
           resetPayForm();
           showToast('Edit saved offline — will sync', 'info');
@@ -582,17 +598,17 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
 
     // ---- CREATE mode (existing code) ----
     const paymentId = crypto.randomUUID();
-    const timestamp = hlc.now();
     const groupInfo = getGroupInfo(slug);
     const groupId = groupInfo?.internal_id || slug;
 
+    // Each op needs its own HLC timestamp (see create-expense note).
     const ops = [
-      { doc_id: paymentId, op_type: 'lww', field: 'from_user', value: JSON.stringify(payFrom), author_id: currentMemberId, timestamp },
-      { doc_id: paymentId, op_type: 'lww', field: 'to_user', value: JSON.stringify(payTo), author_id: currentMemberId, timestamp },
-      { doc_id: paymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp },
-      { doc_id: paymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp },
-      { doc_id: paymentId, op_type: 'lww', field: 'status', value: JSON.stringify('pending'), author_id: currentMemberId, timestamp },
-      { doc_id: paymentId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp },
+      { doc_id: paymentId, op_type: 'lww', field: 'from_user', value: JSON.stringify(payFrom), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'to_user', value: JSON.stringify(payTo), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'status', value: JSON.stringify('pending'), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp: hlc.now() },
     ];
 
     try {

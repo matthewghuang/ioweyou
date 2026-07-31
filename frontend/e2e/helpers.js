@@ -3,19 +3,8 @@ import { expect } from '@playwright/test';
 
 const BACKEND = process.env.BACKEND_URL || 'http://localhost:8080';
 
-/**
- * @typedef {{ slug: string, cookie_token: string, member_id: string, internal_id: string, group_name: string }} GroupSession
- */
+// ─── API helpers (test setup only) ─────────────────────────────────────────
 
-// ─── API helpers ───────────────────────────────────────────────────────────
-
-/**
- * Creates a group via the public API.
- * @param {string} name
- * @param {string} creatorName
- * @param {string} secret
- * @returns {Promise<{ slug: string, cookie_token: string, member_id: string, internal_id: string }>}
- */
 async function apiFetch(method, url, body, token) {
   const headers = {};
   if (token) headers['X-Group-Token'] = token;
@@ -27,7 +16,6 @@ async function apiFetch(method, url, body, token) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
 
-  // Read body once, as text
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = null; }
@@ -40,16 +28,11 @@ async function apiFetch(method, url, body, token) {
 
 export async function apiCreateGroup(name, creatorName, secret) {
   const data = await apiFetch('POST', '/api/groups', { name, creator_name: creatorName, secret });
-  // The API returns the slug as 'id' — remap for convenience
   return { ...data, slug: data.id };
 }
 
 export async function apiJoinGroup(slug, name, secret) {
   return apiFetch('POST', '/api/groups/join', { slug, name, secret });
-}
-
-export async function apiGroupInfo(slug) {
-  return apiFetch('GET', `/api/groups/${encodeURIComponent(slug)}/info`);
 }
 
 export async function apiCreateExpense(slug, token, expense) {
@@ -76,101 +59,79 @@ export async function apiGetBalances(slug, token) {
   return apiFetch('GET', `/api/groups/${encodeURIComponent(slug)}/balances`, undefined, token);
 }
 
-// ─── Browser state helpers ─────────────────────────────────────────────────
+// ─── Group session fixture ─────────────────────────────────────────────────
 
 /**
- * Navigates to the app origin so localStorage is accessible, then sets the
- * auth tokens that make the SPA recognise the user as authenticated for a group.
+ * Create a group (creator "Alice") plus any extra members via the API, and
+ * return a session object used to authenticate the browser as any member.
  *
- * Call *before* navigating to the group detail page.
- *
- * @param {import('@playwright/test').Page} page
- * @param {string} slug
- * @param {string} token
- * @param {{ name: string, member_name: string, member_id: string, internal_id: string }} groupInfo
+ * @param {string} name
+ * @param {string[]} [memberNames] - extra members to join (besides Alice)
+ * @param {string} [secret]
  */
-export async function setGroupAuth(page, slug, token, groupInfo) {
-  // Must be on the same origin before accessing localStorage
-  await page.goto('/');
-  try { await page.waitForLoadState('domcontentloaded', { timeout: 5000 }); } catch { /* SPA may error, fine */ }
+export async function createGroup(name, memberNames = [], secret = 'secret') {
+  const creator = await apiCreateGroup(name, 'Alice', secret);
+  const members = [
+    { name: 'Alice', member_id: creator.member_id, cookie_token: creator.cookie_token },
+  ];
+  for (const memberName of memberNames) {
+    const joined = await apiJoinGroup(creator.slug, memberName, secret);
+    members.push({ name: memberName, member_id: joined.member_id, cookie_token: joined.cookie_token });
+  }
 
-  await page.evaluate(
-    ({ slug, token, groupInfo }) => {
-      localStorage.setItem(`ioweyou_token_${slug}`, token);
-      localStorage.setItem(`ioweyou_group_${slug}`, JSON.stringify(groupInfo));
+  return {
+    slug: creator.slug,
+    internal_id: creator.internal_id,
+    members,
+    /** @returns {{ name: string, member_id: string, cookie_token: string }} */
+    member(who) {
+      return members.find((m) => m.name === who);
     },
-    { slug, token, groupInfo },
-  );
+  };
 }
 
 /**
- * Navigates to the app root and waits for the SPA to render.
+ * Authenticate the page as `who` and navigate to the group detail page.
+ * Waits (web-first) for the group header to render.
+ *
  * @param {import('@playwright/test').Page} page
+ * @param {ReturnType<typeof createGroup>} session
+ * @param {string} who - member name to authenticate as
+ * @param {string} groupName
  */
-export async function goToApp(page) {
+export async function openGroup(page, session, who, groupName) {
+  const member = session.member(who);
   await page.goto('/');
-  // Use 'load' instead of 'networkidle' because the SPA keeps
-  // a persistent WebSocket connection that would block 'networkidle' forever.
-  await page.waitForLoadState('load');
-  // Allow SPA to finish rendering
-  await page.waitForTimeout(500);
+  await page.evaluate(
+    ({ slug, token, info }) => {
+      localStorage.setItem(`ioweyou_token_${slug}`, token);
+      localStorage.setItem(`ioweyou_group_${slug}`, JSON.stringify(info));
+    },
+    {
+      slug: session.slug,
+      token: member.cookie_token,
+      info: {
+        name: groupName,
+        member_name: member.name,
+        member_id: member.member_id,
+        internal_id: session.internal_id,
+      },
+    },
+  );
+  await page.goto(`/groups/${session.slug}`);
+  await expect(page.getByText(groupName).first()).toBeVisible();
 }
 
 /**
- * Navigates to the group detail page in the SPA.
- * @param {import('@playwright/test').Page} page
- * @param {string} slug
+ * Click a group detail tab (Expenses / Payments / Balance).
  */
-export async function goToGroup(page, slug) {
-  await page.goto(`/groups/${slug}`);
-  // Use 'load' instead of 'networkidle' because the SPA keeps
-  // a persistent WebSocket connection that would block 'networkidle' forever.
-  await page.waitForLoadState('load');
-  // Wait for group data to load ("Loading group…" to disappear)
-  await page.waitForFunction(() => {
-    const el = document.querySelector('.empty-state');
-    return !el || !el.textContent.includes('Loading group');
-  }, { timeout: 10000 }).catch(() => {});
-  await page.waitForTimeout(300);
-}
-
-// ─── UI interaction helpers ────────────────────────────────────────────────
-
-/**
- * Fills an input by its label text (wraps the element in the same row).
- * Uses the input's own label, placeholder, or aria-label as fallback.
- * @param {import('@playwright/test').Page} page
- * @param {string} label
- * @param {string} value
- */
-export async function fillByLabel(page, label, value) {
-  await page.getByLabel(label).fill(value);
+export async function openTab(page, tab) {
+  await page.getByRole('button', { name: new RegExp(`^${tab}`) }).click();
 }
 
 /**
- * Clicks a button by its text.
- * @param {import('@playwright/test').Page} page
- * @param {string} text
+ * The "not yet synced" badge shown on locally-queued expenses/payments.
  */
-export async function clickButton(page, text) {
-  await page.getByRole('button', { name: text }).click();
-}
-
-/**
- * Waits for the page to show a specific text (useful after navigation/actions).
- * @param {import('@playwright/test').Page} page
- * @param {string} text
- * @param {{ timeout?: number }} [opts]
- */
-export async function waitForText(page, text, opts) {
-  await page.getByText(text, { exact: false }).waitFor(opts);
-}
-
-/**
- * Expects the page to contain a visible element with the given text.
- * @param {import('@playwright/test').Page} page
- * @param {string|RegExp} text
- */
-export async function expectVisible(page, text) {
-  await expect(page.getByText(text).first()).toBeVisible();
+export function pendingSyncBadge(page) {
+  return page.locator('.badge-warning[title="Not yet synced"]');
 }

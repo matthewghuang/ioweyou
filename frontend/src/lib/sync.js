@@ -79,7 +79,7 @@ export async function syncGroup(slug) {
 				);
 
 				if (response.operations && response.operations.length > 0) {
-					await addOps(response.operations);
+					await addOps(response.operations, slug);
 				}
 
 				if (response.cursors) {
@@ -143,7 +143,7 @@ export async function syncAll() {
  */
 export async function createOp(op, slug) {
 	// Persist locally first
-	await addOp(op);
+	await addOp(op, slug);
 
 	// Attempt push when online
 	if (get(online)) {

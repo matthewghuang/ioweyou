@@ -33,6 +33,24 @@ type PushResponse struct {
 	Accepted int `json:"accepted"`
 }
 
+// normalizePushedOps recovers the canonical `value` bytes for client-pushed
+// operations. Clients transport each value as a JSON string (their own
+// JSON.stringify of the value), so a json.RawMessage captured from the wire
+// keeps the surrounding quotes and any embedded escapes. Decoding that string
+// once restores the same representation the server stores for locally-created
+// operations (e.g. `"Dinner"` for a string, `75` for a number).
+func normalizePushedOps(ops []crdt.Operation) {
+	for i := range ops {
+		v := ops[i].Value
+		if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+			var s string
+			if err := json.Unmarshal(v, &s); err == nil {
+				ops[i].Value = json.RawMessage(s)
+			}
+		}
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -161,6 +179,10 @@ func HandlePush(db *sql.DB, hlc *crdt.HLC, bcast *Broadcaster) http.HandlerFunc 
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
+
+		// Ops arrive with value as a JSON string; recover the raw value before
+		// group resolution and insertion.
+		normalizePushedOps(req.Operations)
 
 		// ---- Auth check BEFORE inserting any data ----
 		// Determine affected groups from the operations themselves (handles new

@@ -1,203 +1,96 @@
 // @ts-check
 import { test, expect } from '@playwright/test';
 import {
-  apiCreateGroup,
-  apiJoinGroup,
   apiCreateExpense,
   apiCreatePayment,
-  apiConfirmPayment,
   apiListPayments,
-  setGroupAuth,
-  goToGroup,
-  clickButton,
-  fillByLabel,
-  waitForText,
-  expectVisible,
+  createGroup,
+  openGroup,
+  openTab,
 } from '../helpers.js';
 
 test.describe('Payment flow', () => {
   test('records a payment as the current member', async ({ page }) => {
     const groupName = `E2E Payment ${Date.now()}`;
-    const secret = 'secret';
+    const session = await createGroup(groupName, ['Bob']);
+    const alice = session.member('Alice');
+    const bob = session.member('Bob');
 
-    const { slug, cookie_token: aliceToken, member_id: aliceId, internal_id } =
-      await apiCreateGroup(groupName, 'Alice', secret);
+    // Pre-create an expense so the group has context
+    await apiCreateExpense(session.slug, alice.cookie_token, { description: 'Dinner', amount: 100, split_type: 'equal' });
 
-    const bob = await apiJoinGroup(slug, 'Bob', secret);
+    // Auth as Bob — the payment "from" is always the current member
+    await openGroup(page, session, 'Bob', groupName);
+    await openTab(page, 'Payments');
+    await expect(page.getByText(/no payments/i)).toBeVisible();
 
-    // Pre-create an expense via API so the group has context
-    await apiCreateExpense(slug, aliceToken, {
-      description: 'Dinner',
-      amount: 100,
-      split_type: 'equal',
-    });
+    await page.getByRole('button', { name: '+ Record Payment', exact: true }).click();
+    await page.getByLabel('To (recipient)').selectOption(alice.member_id);
+    await page.getByLabel('Amount').fill('50');
+    await page.getByLabel('Method (optional)').fill('Venmo');
+    await page.getByRole('button', { name: 'Record Payment', exact: true }).click();
 
-    // Auth as Bob — the payment "from" field is always the current member
-    await setGroupAuth(page, slug, bob.cookie_token, {
-      name: groupName,
-      member_name: 'Bob',
-      member_id: bob.member_id,
-      internal_id,
-    });
-
-    await goToGroup(page, slug);
-
-    // Navigate to Payments tab using the tab button text
-    await page.locator('button.tab').filter({ hasText: 'Payments' }).click();
-    await waitForText(page, /no payments/i);
-
-    // Click "+ Record Payment" to open the form
-    await clickButton(page, '+ Record Payment');
-
-    // "From" is shown as static text (always the current member = Bob)
-    // Verify the static display shows "Bob" or similar
-    await expect(page.getByText('Bob').first()).toBeVisible();
-
-    // Select "To" = Alice
-    await page.selectOption('#pay-to', aliceId);
-
-    // Fill Amount
-    await fillByLabel(page, 'Amount', '50');
-
-    // Fill Method (optional)
-    await fillByLabel(page, 'Method (optional)', 'Venmo');
-
-    // Click submit button "Record Payment"
-    await clickButton(page, 'Record Payment');
-
-    // Payment should appear in the list with pending status
-    await waitForText(page, /pending/i);
-    await expectVisible(page, '$50.00');
-    // Verify the direction shows "Bob → Alice"
-    await expectVisible(page, /Bob.*→.*Alice|Bob.*Alice/);
+    await expect(page.getByText('pending', { exact: true })).toBeVisible();
+    await expect(page.getByText('$50.00').first()).toBeVisible();
+    await expect(page.getByText(/Bob.*→.*Alice|Bob.*Alice/).first()).toBeVisible();
   });
 
   test('confirms a payment as the recipient', async ({ page }) => {
     const groupName = `E2E Confirm ${Date.now()}`;
-    const secret = 'secret';
+    const session = await createGroup(groupName, ['Bob']);
+    const alice = session.member('Alice');
+    const bob = session.member('Bob');
 
-    const { slug, cookie_token: aliceToken, member_id: aliceId, internal_id } =
-      await apiCreateGroup(groupName, 'Alice', secret);
+    await apiCreateExpense(session.slug, alice.cookie_token, { description: 'Dinner', amount: 100, split_type: 'equal' });
+    await apiCreatePayment(session.slug, bob.cookie_token, { from_user: bob.member_id, to_user: alice.member_id, amount: 50 });
 
-    const bob = await apiJoinGroup(slug, 'Bob', secret);
+    await openGroup(page, session, 'Alice', groupName);
+    await openTab(page, 'Payments');
+    await expect(page.getByText('pending', { exact: true })).toBeVisible();
+    await expect(page.getByText('$50.00').first()).toBeVisible();
 
-    // Create an expense as Alice
-    await apiCreateExpense(slug, aliceToken, {
-      description: 'Dinner',
-      amount: 100,
-      split_type: 'equal',
-    });
-
-    // Create a payment as Bob → Alice via API
-    const payment = await apiCreatePayment(slug, bob.cookie_token, {
-      from_user: bob.member_id,
-      to_user: aliceId,
-      amount: 50,
-    });
-
-    // Auth as Alice (the recipient) — she should see the Confirm button
-    await setGroupAuth(page, slug, aliceToken, {
-      name: groupName,
-      member_name: 'Alice',
-      member_id: aliceId,
-      internal_id,
-    });
-
-    await goToGroup(page, slug);
-    await page.locator('button.tab').filter({ hasText: 'Payments' }).click();
-
-    // The payment should be visible with a pending badge
-    await waitForText(page, /pending/i);
-    await expectVisible(page, '$50.00');
-
-    // Alice is the recipient — the "Confirm" button should be visible
-    const confirmBtn = page.getByRole('button', { name: 'Confirm' });
-    await expect(confirmBtn).toBeVisible();
-    await confirmBtn.click();
-
-    // Status should change to confirmed
-    await waitForText(page, /confirmed/i);
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await expect(page.getByText('confirmed', { exact: true })).toBeVisible();
   });
 
-  test('cancels a payment', async ({ page }) => {
+  test('cancels a payment via the confirmation sheet', async ({ page }) => {
     const groupName = `E2E Cancel ${Date.now()}`;
-    const secret = 'secret';
+    const session = await createGroup(groupName, ['Bob']);
+    const alice = session.member('Alice');
+    const bob = session.member('Bob');
 
-    const { slug, cookie_token: aliceToken, member_id: aliceId, internal_id } =
-      await apiCreateGroup(groupName, 'Alice', secret);
+    await apiCreatePayment(session.slug, bob.cookie_token, { from_user: bob.member_id, to_user: alice.member_id, amount: 25 });
 
-    const bob = await apiJoinGroup(slug, 'Bob', secret);
+    await openGroup(page, session, 'Alice', groupName);
+    await openTab(page, 'Payments');
+    await expect(page.getByText('pending', { exact: true })).toBeVisible();
 
-    // Create a payment via API (Bob → Alice)
-    const payment = await apiCreatePayment(slug, bob.cookie_token, {
-      from_user: bob.member_id,
-      to_user: aliceId,
-      amount: 25,
-    });
+    // The payment row's Cancel button opens the confirmation sheet
+    await page.getByRole('button', { name: 'Cancel', exact: true }).first().click();
+    await expect(page.getByRole('button', { name: 'Cancel Payment', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel Payment', exact: true }).click();
 
-    // Auth as Alice
-    await setGroupAuth(page, slug, aliceToken, {
-      name: groupName,
-      member_name: 'Alice',
-      member_id: aliceId,
-      internal_id,
-    });
-
-    await goToGroup(page, slug);
-    await page.locator('button.tab').filter({ hasText: 'Payments' }).click();
-    await waitForText(page, /pending/i);
-
-    // Handle the confirmation dialog
-    page.once('dialog', (dialog) => {
-      expect(dialog.message()).toContain('Cancel');
-      dialog.accept();
-    });
-
-    await clickButton(page, 'Cancel');
-
-    // After cancellation the payment should disappear
-    // Either show "no payments" or show cancelled status text
-    await page.waitForTimeout(500);
-    const hasEmptyState = await page.getByText(/no payments/i).isVisible().catch(() => false);
-    expect(hasEmptyState).toBeTruthy();
+    // Payment disappears from the list
+    await expect(page.getByText('$25.00')).toHaveCount(0);
+    await expect(page.getByText(/no payments/i)).toBeVisible();
   });
 
   test('lists payments from API match what UI shows', async ({ page }) => {
     const groupName = `E2E PayList ${Date.now()}`;
-    const secret = 'secret';
+    const session = await createGroup(groupName, ['Bob']);
+    const alice = session.member('Alice');
+    const bob = session.member('Bob');
 
-    const { slug, cookie_token: aliceToken, member_id: aliceId, internal_id } =
-      await apiCreateGroup(groupName, 'Alice', secret);
-    const bob = await apiJoinGroup(slug, 'Bob', secret);
+    await apiCreatePayment(session.slug, bob.cookie_token, { from_user: bob.member_id, to_user: alice.member_id, amount: 30, method: 'Cash' });
+    await apiCreatePayment(session.slug, alice.cookie_token, { from_user: alice.member_id, to_user: bob.member_id, amount: 15, method: 'Venmo' });
 
-    // Create two payments via API
-    const p1 = await apiCreatePayment(slug, bob.cookie_token, {
-      from_user: bob.member_id, to_user: aliceId, amount: 30, method: 'Cash',
-    });
-    const p2 = await apiCreatePayment(slug, aliceToken, {
-      from_user: aliceId, to_user: bob.member_id, amount: 15, method: 'Venmo',
-    });
+    await openGroup(page, session, 'Alice', groupName);
+    await openTab(page, 'Payments');
+    await expect(page.getByText('$30.00').first()).toBeVisible();
+    await expect(page.getByText('$15.00').first()).toBeVisible();
 
-    // View as Alice
-    await setGroupAuth(page, slug, aliceToken, {
-      name: groupName,
-      member_name: 'Alice',
-      member_id: aliceId,
-      internal_id,
-    });
-
-    await goToGroup(page, slug);
-    await page.locator('button.tab').filter({ hasText: 'Payments' }).click();
-
-    // Both payments should appear
-    await expectVisible(page, '$30.00');
-    await expectVisible(page, '$15.00');
-
-    // API should return the same count
-    const apiPayments = await apiListPayments(slug, aliceToken);
-    expect(apiPayments.length).toBe(2);
-
-    // Verify payment directions shown
-    await expectVisible(page, /→/); // arrow character between names
+    const apiPayments = await apiListPayments(session.slug, alice.cookie_token);
+    expect(apiPayments).toHaveLength(2);
+    await expect(page.getByText('→').first()).toBeVisible();
   });
 });
