@@ -511,7 +511,7 @@ GET /api/groups/{id}/balances
       "to": "alice-uuid",
       "amount": 25.00,
       "breakdown": [
-        { "expense_name": "Dinner", "amount": 25.00 }
+        { "expense_name": "Dinner", "percent": 25.00, "amount": 25.00 }
       ]
     },
     {
@@ -519,7 +519,7 @@ GET /api/groups/{id}/balances
       "to": "alice-uuid",
       "amount": 25.00,
       "breakdown": [
-        { "expense_name": "Dinner", "amount": 25.00 }
+        { "expense_name": "Dinner", "percent": 25.00, "amount": 25.00 }
       ]
     }
   ]
@@ -531,8 +531,9 @@ GET /api/groups/{id}/balances
 2. **Payments:** All non-tombstoned payments are collected and returned in the `payments` array. Only **confirmed** payments affect net balances: `from_user` is credited and `to_user` is debited (reducing the debt).
 3. **Balance computation:** Debtors and creditors are sorted alphabetically and a greedy algorithm pairs them, producing the minimal number of recommended transfers.
 4. Each settlement entry includes a `breakdown` array showing how each expense contributes to the transfer. Positive amounts mean the `from` user owes the `to` user for that expense; negative amounts mean the `to` user owes the `from` user for that expense (reducing the net owed).
-5. Amounts are rounded to 2 decimal places.
-6. Returns empty arrays (`{"members": [], "payments": [], "settlements": []}`) when there is no data.
+5. Each breakdown item includes a `percent` field: the payer's share of that expense (split amount ÷ expense total × 100), omitted when not applicable (e.g. rounding adjustment items).
+6. Amounts are rounded to 2 decimal places.
+7. Returns empty arrays (`{"members": [], "payments": [], "settlements": []}`) when there is no data.
 
 **Fields:**
 

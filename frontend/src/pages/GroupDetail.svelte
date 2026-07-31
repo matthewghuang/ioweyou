@@ -57,6 +57,12 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     return Number(n || 0).toFixed(2);
   }
 
+  function fmtPct(pct) {
+    if (!pct) return '';
+    const r = Math.round(Number(pct) * 100) / 100;
+    return ` (${r}%)`;
+  }
+
   // ---- Data loading ----
 
   async function loadAll() {
@@ -551,7 +557,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
                   <div class="bal-breakdown">
                     {#each bal.breakdown as b}
                       <div class="bal-breakdown-item">
-                        <span class="bal-breakdown-name">{b.expense_name}</span>
+                        <span class="bal-breakdown-name">{b.expense_name}{fmtPct(b.percent)}</span>
                         <span class="bal-breakdown-amt" class:negative={b.amount < 0}>{b.amount < 0 ? '-$' : '$'}{fmt(Math.abs(b.amount))}</span>
                       </div>
                     {/each}

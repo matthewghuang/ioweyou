@@ -13,6 +13,7 @@ import (
 // BreakdownItem shows how one expense contributes to a balance entry.
 type BreakdownItem struct {
 	ExpenseName string  `json:"expense_name"`
+	Percent     float64 `json:"percent,omitempty"`
 	Amount      float64 `json:"amount"`
 }
 
@@ -103,6 +104,7 @@ func GetBalances(s *Server) http.HandlerFunc {
 			toUser      string
 			amount      float64
 			expenseName string
+			expenseTotal float64
 		}
 		var allDebts []debtEdge
 		var collectedPayments []BalancePayment
@@ -141,10 +143,11 @@ func GetBalances(s *Server) http.HandlerFunc {
 					// Track edge for breakdown (skip self-edges)
 					if uid != paidBy && description != "" {
 						allDebts = append(allDebts, debtEdge{
-							fromUser:    uid,
-							toUser:      paidBy,
-							amount:      splitAmt,
-							expenseName: description,
+							fromUser:     uid,
+							toUser:       paidBy,
+							amount:       splitAmt,
+							expenseName:  description,
+							expenseTotal: amount,
 						})
 					}
 				}
@@ -237,13 +240,21 @@ func GetBalances(s *Server) http.HandlerFunc {
 			for _, d := range forward {
 				amt := math.Round(d.amount*scale*100) / 100
 				if amt >= 0.01 {
-					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: amt})
+					pct := 0.0
+					if d.expenseTotal > 0 {
+						pct = math.Round(d.amount/d.expenseTotal*100*100) / 100
+					}
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Percent: pct, Amount: amt})
 				}
 			}
 			for _, d := range reverse {
 				amt := math.Round(d.amount*scale*100) / 100
 				if amt >= 0.01 {
-					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: -amt})
+					pct := 0.0
+					if d.expenseTotal > 0 {
+						pct = math.Round(d.amount/d.expenseTotal*100*100) / 100
+					}
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Percent: pct, Amount: -amt})
 				}
 			}
 
