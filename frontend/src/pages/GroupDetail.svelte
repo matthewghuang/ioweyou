@@ -119,6 +119,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
   }
 
   let loadGen = 0;
+  let _reloading = false;
   function createPersistentHLC() {
     const saved = localStorage.getItem('ioweyou_hlc');
     if (saved) {
@@ -225,23 +226,31 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
 
   async function loadAll() {
     if (!slug) return;
+    if (_reloading) return;
+    _reloading = true;
     error = '';
     loading = true;
     const token = getToken(slug);
     if (!token) {
       error = 'Not authenticated for this group';
       loading = false;
+      _reloading = false;
       return;
     }
     const gen = ++loadGen;
     try {
-      const [g, exps, pays, bals] = await Promise.all([
-        api.get(`/api/groups/${slug}`, token),
-        api.get(`/api/groups/${slug}/expenses`, token),
-        api.get(`/api/groups/${slug}/payments`, token),
-        api.get(`/api/groups/${slug}/balances`, token),
+      // Safety timeout prevents hanging if browser connection pool stalls
+      const data = await Promise.race([
+        Promise.all([
+          api.get(`/api/groups/${slug}`, token),
+          api.get(`/api/groups/${slug}/expenses`, token),
+          api.get(`/api/groups/${slug}/payments`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Load timed out')), 8000)),
       ]);
-      if (gen !== loadGen) return; // stale response, ignore
+      const [g, exps, pays, bals] = data;
+      if (gen !== loadGen) { _reloading = false; return; }
       group = g;
       members = g.members || [];
       expenses = exps;
@@ -252,10 +261,13 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
         handleSplitTypeChange();
       }
     } catch (e) {
-      if (gen !== loadGen) return; // stale error
+      if (gen !== loadGen) { _reloading = false; return; }
       error = e.message;
     } finally {
-      if (gen === loadGen) loading = false;
+      if (gen === loadGen) {
+        loading = false;
+        _reloading = false;
+      }
     }
   }
 
@@ -447,12 +459,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
         throw new Error('offline');
       }
       resetExpForm();
-      const [exps, bals] = await Promise.all([
-        api.get(`/api/groups/${slug}/expenses`, token),
-        api.get(`/api/groups/${slug}/balances`, token),
-      ]);
-      expenses = exps;
-      balances = bals;
+      loadAll();
       showToast('Expense added', 'success', 5000, {
         label: 'Undo',
         onClick: async () => {
@@ -762,6 +769,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
     });
 
     return () => {
+      _reloading = false;
       unsubOnline();
       loadGen++;
       setOnUpdate(null);
