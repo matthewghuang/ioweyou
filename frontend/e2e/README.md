@@ -3,7 +3,7 @@
 End-to-end tests for the I Owe You frontend, covering the core user flows:
 
 - **Group creation and joining** — creating groups, joining via invite link, auth errors
-- **Expense management** — adding equal-split and custom-split expenses, empty states
+- **Expense management** — adding equal-split and custom-split expenses, empty states, clean submission when `crypto.randomUUID` is unavailable (regression: console errors fail the test)
 - **Payment flow** — recording, confirming, and cancelling payments
 - **Balance display** — settlement calculations, partial payments, per-expense breakdowns
 
