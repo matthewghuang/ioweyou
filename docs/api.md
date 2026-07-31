@@ -484,7 +484,7 @@ DELETE /api/payments/{id}
 
 ## 5. Balances
 
-Computes net balances from all non-deleted expenses and confirmed payments in a group, then produces recommended transfers with a per-expense breakdown.
+Returns a balance sheet with each member's net position, recorded payments, and recommended settlements with a per-expense breakdown.
 
 ### 5.1 Get Balances
 
@@ -495,38 +495,76 @@ GET /api/groups/{id}/balances
 **Response `200 OK`:**
 
 ```json
-[
-  {
-    "from": "user-a-uuid",
-    "to": "user-c-uuid",
-    "amount": 25.00,
-    "breakdown": [
-      { "expense_name": "Dinner", "amount": 25.00 }
-    ]
-  },
-  {
-    "from": "user-b-uuid",
-    "to": "user-c-uuid",
-    "amount": 15.50,
-    "breakdown": [
-      { "expense_name": "Dinner", "amount": 15.50 }
-    ]
-  }
-]
+{
+  "members": [
+    { "user_id": "alice-uuid", "balance": 50.00 },
+    { "user_id": "bob-uuid",   "balance": 0.00 },
+    { "user_id": "charlie-uuid", "balance": -25.00 },
+    { "user_id": "dave-uuid",  "balance": -25.00 }
+  ],
+  "payments": [
+    { "id": "pay-uuid", "from": "bob-uuid", "to": "alice-uuid", "amount": 25.00, "status": "confirmed", "method": "Venmo" }
+  ],
+  "settlements": [
+    {
+      "from": "charlie-uuid",
+      "to": "alice-uuid",
+      "amount": 25.00,
+      "breakdown": [
+        { "expense_name": "Dinner", "percent": 25.00, "amount": 25.00 }
+      ]
+    },
+    {
+      "from": "dave-uuid",
+      "to": "alice-uuid",
+      "amount": 25.00,
+      "breakdown": [
+        { "expense_name": "Dinner", "percent": 25.00, "amount": 25.00 }
+      ]
+    }
+  ]
+}
 ```
 
 **Behaviour:**
 1. **Expenses:** For each non-tombstoned expense, the payer is credited the full amount, and each participant is debited their split amount.
-2. **Payments:** For each confirmed (non-tombstoned) payment, `from_user` is credited and `to_user` is debited (reducing the debt).
+2. **Payments:** All non-tombstoned payments are collected and returned in the `payments` array. Only **confirmed** payments affect net balances: `from_user` is credited and `to_user` is debited (reducing the debt).
 3. **Balance computation:** Debtors and creditors are sorted alphabetically and a greedy algorithm pairs them, producing the minimal number of recommended transfers.
-4. Each entry includes a `breakdown` array showing how each expense contributes to the transfer. Positive amounts mean the `from` user owes the `to` user for that expense; negative amounts mean the `to` user owes the `from` user for that expense (reducing the net owed).
-5. Amounts are rounded to 2 decimal places.
-6. Returns an empty array (`[]`) when everyone is balanced.
+4. Each settlement entry includes a `breakdown` array showing how each expense contributes to the transfer. Positive amounts mean the `from` user owes the `to` user for that expense; negative amounts mean the `to` user owes the `from` user for that expense (reducing the net owed).
+5. Each breakdown item includes a `percent` field: the payer's share of that expense (split amount ÷ expense total × 100), omitted when not applicable (e.g. rounding adjustment items).
+6. Amounts are rounded to 2 decimal places.
+7. Returns empty arrays (`{"members": [], "payments": [], "settlements": []}`) when there is no data.
+
+**Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `members` | `BalanceMember[]` | Each member's net position. Positive = owed money, negative = owes money. |
+| `payments` | `BalancePayment[]` | All recorded payments (confirmed and pending). |
+| `settlements` | `BalanceEntry[]` | Recommended transfers to settle outstanding balances. Empty when everyone is settled. |
+
+### BalanceMember
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `user_id` | string | User identifier |
+| `balance` | float | Net balance. Positive = owed money, negative = owes money. |
+
+### BalancePayment
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Payment document ID |
+| `from` | string | Payer user ID |
+| `to` | string | Recipient user ID |
+| `amount` | float | Payment amount |
+| `status` | string | `"confirmed"` or `"pending"` |
+| `method` | string | Payment method (optional) |
 
 **Example:**
 - Alice pays $100 for dinner split 4 ways → Alice is owed $75, others owe $25 each.
-- Bob pays Alice $25 (confirmed) → Alice is owed $50, Bob owes $0, Charlie owes $25, Dave owes $25.
-- Response: `[{"from": "charlie-uuid", "to": "alice-uuid", "amount": 25.00, "breakdown": [{"expense_name": "Dinner", "amount": 25.00}]}, {"from": "dave-uuid", "to": "alice-uuid", "amount": 25.00, "breakdown": [{"expense_name": "Dinner", "amount": 25.00}]}]`
+- Bob pays Alice $25 via Venmo (confirmed) → Alice is owed $50, Bob owes $0, Charlie owes $25, Dave owes $25.
+- Response contains members with their net positions, the payment record, and settlements for Charlie->Alice and Dave->Alice.
 
 ---
 
