@@ -1522,6 +1522,14 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
     margin-bottom: 1rem;
   }
 
+  /* The global .card rule adds margin-bottom: 1rem, which would make the
+     container taller than the card; the absolutely positioned swipe action
+     (height: 100%) would then stick out below the card. The container's own
+     margin provides the spacing, so drop the card's. */
+  .swipe-content.card {
+    margin-bottom: 0;
+  }
+
   .swipe-content {
     position: relative;
     z-index: 1;
