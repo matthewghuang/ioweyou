@@ -173,7 +173,13 @@
   .auth-card {
     width: 100%;
     max-width: 400px;
-    padding: 2rem;
+    padding: 1.5rem;
+  }
+
+  @media (min-width: 480px) {
+    .auth-card {
+      padding: 2rem;
+    }
   }
 
   .auth-title {

@@ -161,14 +161,24 @@ func ListPayments(s *Server) http.HandlerFunc {
 			respondError(w, 500, "db error")
 			return
 		}
-		defer rows.Close()
-
-		var payments []map[string]any
+		// Collect doc_ids first and release the query before reading states:
+		// the store shares one SQLite connection, so holding rows open while
+		// calling GetLatestState would deadlock the pool.
+		var docIDs []string
 		for rows.Next() {
 			var docID string
-			if err := rows.Scan(&docID); err != nil {
-				continue
+			if rows.Scan(&docID) == nil {
+				docIDs = append(docIDs, docID)
 			}
+		}
+		if err := rows.Err(); err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		rows.Close()
+
+		var payments []map[string]any
+		for _, docID := range docIDs {
 			state, err := s.Store.GetLatestState(docID)
 			if err != nil || len(state) == 0 {
 				continue
@@ -182,10 +192,6 @@ func ListPayments(s *Server) http.HandlerFunc {
 			}
 			state["id"] = docID
 			payments = append(payments, state)
-		}
-		if err := rows.Err(); err != nil {
-			respondError(w, 500, "db error")
-			return
 		}
 		if payments == nil {
 			payments = []map[string]any{}
@@ -225,6 +231,101 @@ func GetPayment(s *Server) http.HandlerFunc {
 
 		state["id"] = docID
 		respondOK(w, state)
+	}
+}
+
+func UpdatePayment(s *Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		docID := chi.URLParam(r, "id")
+		member := auth.MemberFromContext(r.Context())
+		if member == nil {
+			respondError(w, 401, "unauthorized")
+			return
+		}
+
+		state, err := s.Store.GetLatestState(docID)
+		if err != nil {
+			respondError(w, 500, "db error")
+			return
+		}
+		if len(state) == 0 {
+			respondError(w, 404, "not found")
+			return
+		}
+		if t, ok := state["tombstone"]; ok && t == true {
+			respondError(w, 404, "not found")
+			return
+		}
+
+		// Verify status is pending
+		if status, ok := state["status"].(string); !ok || status != "pending" {
+			respondError(w, 400, "can only edit pending payments")
+			return
+		}
+
+		// Verify caller is the from_user
+		fromUser, _ := state["from_user"].(string)
+		if fromUser != member.MemberID {
+			respondError(w, 403, "only the payer can edit this payment")
+			return
+		}
+
+		gid, _ := state["group_id"].(string)
+		if !isGroupMember(s.AuthDB, gid, member.MemberID) {
+			respondError(w, 403, "not a member")
+			return
+		}
+
+		var body struct {
+			Amount *float64 `json:"amount,omitempty"`
+			Method *string  `json:"method,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			respondError(w, 400, "invalid body")
+			return
+		}
+
+		// Update allowed fields
+		if body.Amount != nil {
+			if *body.Amount <= 0 {
+				respondError(w, 400, "amount must be positive")
+				return
+			}
+			if err := s.Store.Append(crdt.Operation{
+				DocID: docID, OpType: crdt.OpLWW, Field: "amount",
+				Value: mustMarshal(*body.Amount), AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+			}); err != nil {
+				respondError(w, 500, "failed to update payment")
+				return
+			}
+		}
+
+		if body.Method != nil {
+			if err := s.Store.Append(crdt.Operation{
+				DocID: docID, OpType: crdt.OpLWW, Field: "method",
+				Value: mustMarshal(*body.Method), AuthorID: member.MemberID, Timestamp: s.HLC.Now(),
+			}); err != nil {
+				respondError(w, 500, "failed to update payment")
+				return
+			}
+		}
+
+		state, err = s.Store.GetLatestState(docID)
+		if err != nil {
+			respondError(w, 500, "failed to read state")
+			return
+		}
+		state["id"] = docID
+		respondOK(w, state)
+
+		// Broadcast to group subscribers
+		if s.Broadcaster != nil {
+			if ops, err := s.Store.GetOps(docID, nil); err == nil && len(ops) > 0 {
+				if gid != "" {
+					s.Broadcaster.Broadcast(gid, ops)
+				}
+			}
+		}
 	}
 }
 

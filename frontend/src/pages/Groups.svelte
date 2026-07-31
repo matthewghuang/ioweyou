@@ -1,17 +1,50 @@
 <script>
   import { onMount } from 'svelte';
-  import { getAllGroups, getToken } from '../lib/api.js';
+  import { getAllGroups, getToken, api } from '../lib/api.js';
   import { currentGroupSlug } from '../lib/stores.js';
+  import { haptic } from '../lib/haptic.js';
   import ShareModal from '../lib/ShareModal.svelte';
 
   let { onSelectGroup } = $props();
 
   let groups = $state([]);
+  let balances = $state({});
   let showShare = $state(false);
   let shareLink = $state('');
 
   function loadGroups() {
     groups = getAllGroups();
+    fetchBalances();
+  }
+
+  async function fetchBalances() {
+    const allGroups = getAllGroups();
+    const results = {};
+
+    const fetches = allGroups.map(async (g) => {
+      const token = getToken(g.slug);
+      if (!token) return;
+
+      results[g.slug] = { net: 0, loading: true };
+
+      try {
+        const data = await api.get(`/api/groups/${g.slug}/balances`, token);
+        const memberId = g.member_id;
+
+        let net = 0;
+        for (const entry of data) {
+          if (entry.to === memberId) net += entry.amount;
+          if (entry.from === memberId) net -= entry.amount;
+        }
+
+        results[g.slug] = { net, loading: false };
+      } catch {
+        results[g.slug] = { net: 0, loading: false };
+      }
+    });
+
+    await Promise.all(fetches);
+    balances = results;
   }
 
   function selectGroup(slug) {
@@ -48,10 +81,21 @@
           <div class="group-card-name">{group.name}</div>
           <div class="group-card-meta">
             <span class="badge">Signed in as {group.member_name} (you)</span>
+            {#if balances[group.slug]}
+              {#if balances[group.slug].loading}
+                <span class="badge balance-loading">...</span>
+              {:else if balances[group.slug].net > 0}
+                <span class="badge badge-success">You're owed ${balances[group.slug].net.toFixed(2)}</span>
+              {:else if balances[group.slug].net < 0}
+                <span class="badge badge-warning">You owe ${Math.abs(balances[group.slug].net).toFixed(2)}</span>
+              {:else}
+                <span class="badge balance-settled">Settled</span>
+              {/if}
+            {/if}
           </div>
         </div>
         <div class="group-card-actions">
-          <button class="btn btn-sm share-btn" onclick={() => openShare(group.slug)} title="Share invite link">Share</button>
+          <button class="btn btn-sm share-btn" onclick={() => openShare(group.slug)} title="Share invite link" use:haptic>Share</button>
           <span class="group-card-arrow" onclick={() => selectGroup(group.slug)} role="button" tabindex="0" onkeydown={(e) => e.key === 'Enter' && selectGroup(group.slug)}>&rarr;</span>
         </div>
       </div>
@@ -68,7 +112,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1.25rem;
+    margin-bottom: 1rem;
+    min-height: var(--touch-target, 44px);
   }
 
   .page-title {
@@ -79,7 +124,7 @@
   .group-list {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: 0.625rem;
   }
 
   .group-card {
@@ -89,7 +134,7 @@
     transition: background 0.15s, border-color 0.15s;
     width: 100%;
     border: 1px solid var(--border);
-    padding: 0.75rem 1rem;
+    padding: 0.75rem 0.75rem;
   }
 
   .group-card:hover {
@@ -97,11 +142,15 @@
     border-color: var(--text-muted);
   }
 
+  .group-card:active {
+    transform: scale(0.99);
+  }
+
   .group-card-main {
     flex: 1;
     min-width: 0;
     cursor: pointer;
-    padding: 0;
+    padding: 0.375rem 0;
     background: none;
     border: none;
     text-align: left;
@@ -138,6 +187,7 @@
 
   .share-btn {
     font-size: 0.8rem;
+    min-height: var(--touch-target, 44px);
   }
 
   .group-card-arrow {
@@ -151,5 +201,15 @@
     outline: 2px solid var(--accent);
     outline-offset: 2px;
     border-radius: 4px;
+  }
+
+  .balance-loading {
+    opacity: 0.5;
+  }
+
+  .balance-settled {
+    background: rgba(63, 185, 80, 0.1);
+    color: var(--success, #3fb950);
+    border-color: rgba(63, 185, 80, 0.2);
   }
 </style>

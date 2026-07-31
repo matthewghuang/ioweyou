@@ -18,6 +18,15 @@ export function clearAllTokens() {
   }
 }
 
+/**
+ * Remove token and group info for a specific group only.
+ * @param {string} slug
+ */
+export function clearGroupData(slug) {
+  localStorage.removeItem('ioweyou_token_' + slug);
+  localStorage.removeItem('ioweyou_group_' + slug);
+}
+
 // Group metadata storage
 export function setGroupInfo(slug, info) {
   localStorage.setItem('ioweyou_group_' + slug, JSON.stringify(info));

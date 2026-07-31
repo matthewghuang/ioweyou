@@ -1,8 +1,17 @@
 <script>
-  import { currentGroupSlug } from '../lib/stores.js';
-  import { api, getToken, getGroupInfo } from '../lib/api.js';
+  import { currentGroupSlug, currentPage } from '../lib/stores.js';
+  import { api, getToken, getGroupInfo, setGroupInfo, clearAllTokens, clearGroupData } from '../lib/api.js';
+  import { createOp, getLocalOps, syncGroup, syncInProgress } from '../lib/sync.js';
+  import { HLC } from '../lib/crdt.js';
+  import { online, pendingOpsCount } from '../lib/networkStore.js';
+  import { get } from 'svelte/store';
   import { connect, subscribe, setOnUpdate, disconnect as wsDisconnect } from '../lib/websocket.js';
   import ShareModal from '../lib/ShareModal.svelte';
+import { swipeBack, pullToRefresh, swipeReveal } from '../lib/gestures.js';
+  import { haptic } from '../lib/haptic.js';
+  import BottomSheet from '../lib/BottomSheet.svelte';
+  import { showToast } from '../lib/toastStore.js';
+import { scrollIntoViewOnFocus } from '../lib/forms.js';
 
   let { onBack } = $props();
 
@@ -17,6 +26,61 @@
   let activeTab = $state('expenses');
   let showShare = $state(false);
   let inviteLink = $derived(slug ? `${window.location.origin}/group/${slug}` : '');
+  let netBalance = $derived.by(() => {
+    if (!balances || !currentMemberId) return null;
+    let net = 0;
+    for (const entry of balances) {
+      if (entry.to === currentMemberId) net += entry.amount;
+      if (entry.from === currentMemberId) net -= entry.amount;
+    }
+    return net;
+  });
+  let spendingSummary = $derived.by(() => {
+    if (!expenses || !members || members.length === 0) return [];
+    
+    const paidBy = {};  // member_id -> total paid
+    const owesBy = {};  // member_id -> total owed (split share)
+    
+    for (const exp of expenses) {
+      // Skip tombstoned expenses
+      if (exp.tombstone) continue;
+      
+      const amount = Number(exp.amount || 0);
+      const payer = exp.paid_by;
+      
+      paidBy[payer] = (paidBy[payer] || 0) + amount;
+      
+      // Calculate what each person owes from splits
+      if (exp.splits && exp.splits.length > 0) {
+        // Custom/percentage splits
+        for (const split of exp.splits) {
+          const splitAmount = Number(split.amount || 0);
+          owesBy[split.user_id] = (owesBy[split.user_id] || 0) + splitAmount;
+        }
+      } else {
+        // Equal split: distribute among all members
+        const share = amount / members.length;
+        for (const m of members) {
+          owesBy[m.id] = (owesBy[m.id] || 0) + share;
+        }
+      }
+    }
+    
+    return members.map(m => {
+      const paid = paidBy[m.id] || 0;
+      const owes = owesBy[m.id] || 0;
+      return {
+        name: m.name,
+        id: m.id,
+        paid,
+        owes,
+        net: paid - owes,
+        isYou: m.id === currentMemberId,
+      };
+    }).sort((a, b) => b.net - a.net);  // most positive (owed) first
+  });
+  let renaming = $state(false);
+  let renameValue = $state('');
 
   // Expense form
   let showExpForm = $state(false);
@@ -25,6 +89,11 @@
   let expSplitType = $state('equal');
   let expCustomSplits = $state([]);
 let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
+  let expPctSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.amount || 0), 0));
+let totalExpenses = $derived(expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0));
+let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').reduce((sum, p) => sum + Number(p.amount || 0), 0));
+  let editingExpenseId = $state(null);  // the doc_id being edited, null = create mode
+  let editingPaymentId = $state(null);  // payment doc_id being edited, null = create mode
   let expCreating = $state(false);
   let expError = $state('');
 
@@ -38,7 +107,43 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   let payError = $state('');
 
   let currentMemberId = $state(null);
+  let confirmDialog = $state({ show: false, payId: null, expId: null, action: 'cancelPayment' });
+  let fabLabel = $derived(activeTab === 'expenses' ? 'Add expense' : 'Record payment');
+
+  function toggleFabAction() {
+    if (activeTab === 'expenses') {
+      showExpForm = !showExpForm;
+    } else if (activeTab === 'payments') {
+      showPayForm = !showPayForm;
+    }
+  }
+
   let loadGen = 0;
+  let _reloading = false;
+  function createPersistentHLC() {
+    const saved = localStorage.getItem('ioweyou_hlc');
+    if (saved) {
+      try {
+        const state = JSON.parse(saved);
+        const h = new HLC();
+        h.wall_time = state.wall_time;
+        h.logical = state.logical;
+        return h;
+      } catch {}
+    }
+    return new HLC();
+  }
+
+  let hlc = createPersistentHLC();
+
+  $effect(() => {
+    return () => {
+      localStorage.setItem('ioweyou_hlc', JSON.stringify({
+        wall_time: hlc.wall_time,
+        logical: hlc.logical,
+      }));
+    };
+  });
 
   // ---- Helpers ----
 
@@ -57,10 +162,64 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     return Number(n || 0).toFixed(2);
   }
 
-  function fmtPct(pct) {
-    if (!pct) return '';
-    const r = Math.round(Number(pct) * 100) / 100;
-    return ` (${r}%)`;
+  // ---- Rename handlers ----
+
+  function startRenaming() {
+    renameValue = group.name;
+    renaming = true;
+    setTimeout(() => {
+      const input = document.querySelector('.rename-input');
+      if (input) input.focus();
+    }, 0);
+  }
+
+  async function handleRenameSubmit(e) {
+    e.preventDefault();
+    if (!renameValue.trim() || renameValue.trim() === group.name) {
+      renaming = false;
+      return;
+    }
+
+    const token = getToken(slug);
+    if (!token) return;
+
+    try {
+      if (get(online)) {
+        await api.patch(`/api/groups/${slug}`, { name: renameValue.trim() }, token);
+        group = { ...group, name: renameValue.trim() };
+        const cachedInfo = getGroupInfo(slug);
+        if (cachedInfo) {
+          setGroupInfo(slug, { ...cachedInfo, name: renameValue.trim() });
+        }
+        showToast('Group renamed', 'success');
+      } else {
+        throw new Error('offline');
+      }
+    } catch (e) {
+      if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+        // Offline: create CRDT op locally
+        const timestamp = hlc.now();
+        const op = {
+          doc_id: group.internal_id || slug,
+          op_type: 'lww',
+          field: 'name',
+          value: JSON.stringify(renameValue.trim()),
+          author_id: currentMemberId,
+          timestamp,
+        };
+        await createOp(op, slug);
+        group = { ...group, name: renameValue.trim() };
+        const cachedInfo = getGroupInfo(slug);
+        if (cachedInfo) {
+          setGroupInfo(slug, { ...cachedInfo, name: renameValue.trim() });
+        }
+        showToast('Rename saved offline — will sync', 'info');
+      } else {
+        showToast('Failed to rename: ' + e.message, 'error');
+      }
+    }
+
+    renaming = false;
   }
 
   // ---- Data loading ----
@@ -71,6 +230,8 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   async function loadAll(opts = {}) {
     const silent = !!opts.silent;
     if (!slug) return;
+    if (_reloading) return;
+    _reloading = true;
     if (!silent) {
       error = '';
       loading = true;
@@ -81,17 +242,23 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
         error = 'Not authenticated for this group';
         loading = false;
       }
+      _reloading = false;
       return;
     }
     const gen = ++loadGen;
     try {
-      const [g, exps, pays, bals] = await Promise.all([
-        api.get(`/api/groups/${slug}`, token),
-        api.get(`/api/groups/${slug}/expenses`, token),
-        api.get(`/api/groups/${slug}/payments`, token),
-        api.get(`/api/groups/${slug}/balances`, token),
+      // Safety timeout prevents hanging if browser connection pool stalls
+      const data = await Promise.race([
+        Promise.all([
+          api.get(`/api/groups/${slug}`, token),
+          api.get(`/api/groups/${slug}/expenses`, token),
+          api.get(`/api/groups/${slug}/payments`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Load timed out')), 8000)),
       ]);
-      if (gen !== loadGen) return; // stale response, ignore
+      const [g, exps, pays, bals] = data;
+      if (gen !== loadGen) { _reloading = false; return; }
       error = ''; // fresh data supersedes any prior error
       group = g;
       members = g.members || [];
@@ -99,22 +266,26 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       payments = pays;
       balances = bals;
       // If user selected custom split before members loaded, populate now
-      if (expSplitType === 'custom') {
+      if (expSplitType === 'custom' || expSplitType === 'percentage') {
         handleSplitTypeChange();
       }
     } catch (e) {
-      if (gen !== loadGen) return; // stale error
+      if (gen !== loadGen) { _reloading = false; return; }
       // Background refresh failed: keep the last good data on screen;
       // only a foreground load surfaces the error.
       if (!silent) error = e.message;
     } finally {
-      if (gen === loadGen) loading = false;
+      if (gen === loadGen) {
+        loading = false;
+        _reloading = false;
+      }
     }
   }
 
   // ---- Expense form ----
 
   function resetExpForm() {
+    editingExpenseId = null;
     expDesc = '';
     expAmt = 0;
     expSplitType = 'equal';
@@ -124,7 +295,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   }
 
   function handleSplitTypeChange() {
-    if (expSplitType === 'custom') {
+    if (expSplitType === 'custom' || expSplitType === 'percentage') {
       if (members.length === 0) return; // members not loaded yet; loadAll will populate
       const existing = new Map(expCustomSplits.map(s => [s.user_id, s.amount]));
       expCustomSplits = members.map(m => ({
@@ -134,32 +305,236 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     }
   }
 
+  function startEditExpense(exp) {
+    editingExpenseId = exp.id;
+    expDesc = exp.description || '';
+    expAmt = Number(exp.amount || 0);
+    expSplitType = exp.split_type || 'equal';
+
+    if ((expSplitType === 'custom' || expSplitType === 'percentage') && exp.splits && exp.splits.length > 0) {
+      expCustomSplits = exp.splits.map(s => ({
+        user_id: s.user_id,
+        amount: Number(s.amount || 0),
+      }));
+    } else {
+      expCustomSplits = [];
+    }
+
+    expError = '';
+    showExpForm = true;
+  }
+
+  function splitEqually() {
+    const count = expCustomSplits.length;
+    if (count === 0) return;
+
+    if (expSplitType === 'percentage') {
+      const each = Math.floor(100 / count);
+      const remainder = 100 - each * count;
+      expCustomSplits = expCustomSplits.map((s, i) => ({
+        ...s,
+        amount: i === 0 ? each + remainder : each,
+      }));
+    } else {
+      const eachAmount = Math.floor((parseFloat(expAmt || 0) / count) * 100) / 100;
+      const remainder = Math.round((parseFloat(expAmt || 0) - eachAmount * count) * 100) / 100;
+      expCustomSplits = expCustomSplits.map((s, i) => ({
+        ...s,
+        amount: i === 0 ? eachAmount + remainder : eachAmount,
+      }));
+    }
+  }
+
+  function startEditPayment(pay) {
+    editingPaymentId = pay.id;
+    payTo = pay.to_user || '';
+    payAmt = Number(pay.amount || 0);
+    payMethod = pay.method || '';
+    payError = '';
+    showPayForm = true;
+  }
+
   async function handleCreateExpense(e) {
     e.preventDefault();
     expError = '';
     expCreating = true;
     const token = getToken(slug);
-    try {
-      const body = {
-        description: expDesc,
-        amount: parseFloat(expAmt),
-        split_type: expSplitType,
-      };
-      if (expSplitType === 'custom') {
-        body.splits = expCustomSplits
-          .filter(s => s.amount > 0)
-          .map(s => ({ user_id: s.user_id, amount: parseFloat(s.amount) }));
+
+    if (editingExpenseId) {
+      // ---- EDIT mode ----
+      try {
+        if (get(online)) {
+          const body = {
+            description: expDesc,
+            amount: parseFloat(expAmt),
+            split_type: expSplitType,
+          };
+          if (expSplitType === 'custom' || expSplitType === 'percentage') {
+            body.splits = expCustomSplits
+              .filter(s => s.amount > 0)
+              .map(s => ({
+                user_id: s.user_id,
+                amount: expSplitType === 'percentage'
+                  ? Math.round((parseFloat(expAmt) * Number(s.amount) / 100) * 100) / 100
+                  : parseFloat(s.amount),
+              }));
+            body.split_type = 'custom';
+          }
+          await api.patch(`/api/expenses/${editingExpenseId}`, body, token);
+        } else {
+          throw new Error('offline');
+        }
+        // Success
+        editingExpenseId = null;
+        resetExpForm();
+        const [exps, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/expenses`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        expenses = exps;
+        balances = bals;
+        showToast('Expense updated', 'success');
+      } catch (e) {
+        if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+          // Offline: create CRDT ops for changed fields
+          const ops = [
+            { doc_id: editingExpenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp: hlc.now() },
+            { doc_id: editingExpenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp: hlc.now() },
+            { doc_id: editingExpenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp: hlc.now() },
+          ];
+          for (const op of ops) {
+            await createOp(op, slug);
+          }
+          // Reflect the edit locally with a pending marker until the sync
+          // replaces the list from the server.
+          expenses = expenses.map((exp) =>
+            exp.id === editingExpenseId
+              ? { ...exp, description: expDesc, amount: parseFloat(expAmt), split_type: expSplitType, _pending: true }
+              : exp,
+          );
+          editingExpenseId = null;
+          resetExpForm();
+          showToast('Edit saved offline — will sync', 'info');
+        } else {
+          expError = e.message;
+        }
+      } finally {
+        expCreating = false;
       }
-      await api.post(`/api/groups/${slug}/expenses`, body, token);
+      return;
+    }
+
+    // ---- CREATE mode (existing code) ----
+    const expenseId = crypto.randomUUID();
+    const groupInfo = getGroupInfo(slug);
+    const groupId = groupInfo?.internal_id || slug;
+
+    // Each op needs its own HLC timestamp: the server (and the local
+    // IndexedDB key) is UNIQUE on (doc_id, author_id, wall_time, logical),
+    // so reusing one timestamp across the batch silently drops ops.
+    const ops = [];
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'description', value: JSON.stringify(expDesc), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(expAmt)), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'paid_by', value: JSON.stringify(currentMemberId), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp: hlc.now() });
+    ops.push({ doc_id: expenseId, op_type: 'lww', field: 'split_type', value: JSON.stringify(expSplitType), author_id: currentMemberId, timestamp: hlc.now() });
+
+    if ((expSplitType === 'custom' || expSplitType === 'percentage') && expCustomSplits.length > 0) {
+      for (const split of expCustomSplits.filter(s => s.amount > 0)) {
+        const splitAmount = expSplitType === 'percentage'
+          ? Math.round((parseFloat(expAmt) * Number(split.amount) / 100) * 100) / 100
+          : parseFloat(split.amount);
+        ops.push({
+          doc_id: expenseId, op_type: 'rga_insert', field: 'splits',
+          value: JSON.stringify({ user_id: split.user_id, amount: splitAmount }),
+          item_id: crypto.randomUUID(), prev_item_id: '',
+          author_id: currentMemberId, timestamp: hlc.now(),
+        });
+      }
+    }
+
+    let createdExpenseId = null;
+
+    try {
+      if (get(online)) {
+        const body = {
+          description: expDesc,
+          amount: parseFloat(expAmt),
+          split_type: expSplitType,
+        };
+        if (expSplitType === 'custom' || expSplitType === 'percentage') {
+          body.splits = expCustomSplits
+            .filter(s => s.amount > 0)
+            .map(s => ({
+              user_id: s.user_id,
+              amount: expSplitType === 'percentage'
+                ? Math.round((parseFloat(expAmt) * Number(s.amount) / 100) * 100) / 100
+                : parseFloat(s.amount),
+            }));
+          body.split_type = 'custom';
+        }
+        const response = await api.post(`/api/groups/${slug}/expenses`, body, token);
+        createdExpenseId = response.id;
+      } else {
+        throw new Error('offline');
+      }
       resetExpForm();
-      const [exps, bals] = await Promise.all([
-        api.get(`/api/groups/${slug}/expenses`, token),
-        api.get(`/api/groups/${slug}/balances`, token),
-      ]);
-      expenses = exps;
-      balances = bals;
+      loadAll();
+      showToast('Expense added', 'success', 5000, {
+        label: 'Undo',
+        onClick: async () => {
+          const token = getToken(slug);
+          if (!token) return;
+          try {
+            if (!createdExpenseId) return;
+            await api.del(`/api/expenses/${createdExpenseId}`, token);
+            const [exps, bals] = await Promise.all([
+              api.get(`/api/groups/${slug}/expenses`, token),
+              api.get(`/api/groups/${slug}/balances`, token),
+            ]);
+            expenses = exps;
+            balances = bals;
+            showToast('Expense undone', 'info');
+          } catch {
+            showToast('Could not undo', 'error');
+          }
+        },
+      });
     } catch (e) {
-      expError = e.message;
+      if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+        // Offline: queue CRDT ops
+        for (const op of ops) {
+          await createOp(op, slug);
+        }
+        const newExpense = {
+          id: expenseId,
+          description: expDesc,
+          amount: parseFloat(expAmt),
+          split_type: expSplitType,
+          paid_by: currentMemberId,
+          created_at: Date.now(),
+          splits: (expSplitType === 'custom' || expSplitType === 'percentage')
+            ? expCustomSplits.filter(s => s.amount > 0).map(s => ({
+                user_id: s.user_id,
+                amount: expSplitType === 'percentage'
+                  ? Math.round((parseFloat(expAmt) * Number(s.amount) / 100) * 100) / 100
+                  : parseFloat(s.amount),
+              }))
+            : [],
+          _pending: true,
+        };
+        expenses = [...expenses, newExpense];
+        resetExpForm();
+        showToast('Expense added', 'success', 5000, {
+          label: 'Undo',
+          onClick: () => {
+            expenses = expenses.filter(e => e.id !== expenseId);
+            showToast('Expense undone', 'info');
+          },
+        });
+      } else {
+        expError = e.message;
+      }
     } finally {
       expCreating = false;
     }
@@ -168,6 +543,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   // ---- Payment form ----
 
   function resetPayForm() {
+    editingPaymentId = null;
     payFrom = currentMemberId || '';
     payTo = '';
     payMethod = '';
@@ -181,13 +557,82 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     payError = '';
     payCreating = true;
     const token = getToken(slug);
+
+    if (editingPaymentId) {
+      // ---- EDIT mode ----
+      try {
+        if (get(online)) {
+          const body = {
+            amount: parseFloat(payAmt),
+            method: payMethod || '',
+          };
+          await api.patch(`/api/payments/${editingPaymentId}`, body, token);
+        } else {
+          throw new Error('offline');
+        }
+        editingPaymentId = null;
+        resetPayForm();
+        const [pays, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/payments`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        payments = pays;
+        balances = bals;
+        showToast('Payment updated', 'success');
+      } catch (e) {
+        if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+          const ops = [
+            { doc_id: editingPaymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp: hlc.now() },
+            { doc_id: editingPaymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp: hlc.now() },
+          ];
+          for (const op of ops) {
+            await createOp(op, slug);
+          }
+          // Reflect the edit locally with a pending marker until the sync
+          // replaces the list from the server.
+          payments = payments.map((pay) =>
+            pay.id === editingPaymentId
+              ? { ...pay, amount: parseFloat(payAmt), method: payMethod || '', _pending: true }
+              : pay,
+          );
+          editingPaymentId = null;
+          resetPayForm();
+          showToast('Edit saved offline — will sync', 'info');
+        } else {
+          payError = e.message;
+        }
+      } finally {
+        payCreating = false;
+      }
+      return;
+    }
+
+    // ---- CREATE mode (existing code) ----
+    const paymentId = crypto.randomUUID();
+    const groupInfo = getGroupInfo(slug);
+    const groupId = groupInfo?.internal_id || slug;
+
+    // Each op needs its own HLC timestamp (see create-expense note).
+    const ops = [
+      { doc_id: paymentId, op_type: 'lww', field: 'from_user', value: JSON.stringify(payFrom), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'to_user', value: JSON.stringify(payTo), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'amount', value: JSON.stringify(parseFloat(payAmt)), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'method', value: JSON.stringify(payMethod || ''), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'status', value: JSON.stringify('pending'), author_id: currentMemberId, timestamp: hlc.now() },
+      { doc_id: paymentId, op_type: 'lww', field: 'group_id', value: JSON.stringify(groupId), author_id: currentMemberId, timestamp: hlc.now() },
+    ];
+
     try {
-      await api.post(`/api/groups/${slug}/payments`, {
-        from_user: payFrom,
-        to_user: payTo,
-        amount: parseFloat(payAmt),
-        method: payMethod || undefined,
-      }, token);
+      if (get(online)) {
+        await api.post(`/api/groups/${slug}/payments`, {
+          from_user: payFrom,
+          to_user: payTo,
+          amount: parseFloat(payAmt),
+          method: payMethod || undefined,
+        }, token);
+      } else {
+        throw new Error('offline');
+      }
       resetPayForm();
       const [pays, bals] = await Promise.all([
         api.get(`/api/groups/${slug}/payments`, token),
@@ -196,7 +641,25 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       payments = pays;
       balances = bals;
     } catch (e) {
-      payError = e.message;
+      if (!get(online) || e.message === 'offline' || e.message?.includes('Network error')) {
+        for (const op of ops) {
+          await createOp(op, slug);
+        }
+        const newPayment = {
+          id: paymentId,
+          from_user: payFrom,
+          to_user: payTo,
+          amount: parseFloat(payAmt),
+          method: payMethod || '',
+          status: 'pending',
+          created_at: Date.now(),
+          _pending: true,
+        };
+        payments = [...payments, newPayment];
+        resetPayForm();
+      } else {
+        payError = e.message;
+      }
     } finally {
       payCreating = false;
     }
@@ -214,24 +677,79 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       ]);
       payments = pays;
       balances = bals;
+      showToast('Payment confirmed', 'success');
     } catch (e) {
-      alert('Failed to confirm: ' + e.message);
+      showToast('Failed to confirm: ' + e.message, 'error');
     }
   }
 
   async function handleCancelPayment(payId) {
-    if (!confirm('Cancel this payment?')) return;
-    const token = getToken(slug);
+    confirmDialog = { show: true, payId, expId: null, action: 'cancelPayment' };
+  }
+
+  async function handleDeleteExpense(expId) {
+    confirmDialog = { show: true, payId: null, expId, action: 'deleteExpense' };
+  }
+
+  function handleLeaveGroup() {
+    confirmDialog = { show: true, payId: null, expId: null, action: 'leaveGroup' };
+  }
+
+  async function onConfirmLeaveGroup() {
+    const slugVal = slug;
+    confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' };
+    if (!slugVal) return;
+    const token = getToken(slugVal);
+    if (!token) return;
+
     try {
-      await api.del(`/api/payments/${payId}`, token);
-      const [pays, bals] = await Promise.all([
-        api.get(`/api/groups/${slug}/payments`, token),
-        api.get(`/api/groups/${slug}/balances`, token),
-      ]);
-      payments = pays;
-      balances = bals;
+      await api.del(`/api/groups/${slugVal}/members/me`, token);
+      // Clean up local storage
+      clearGroupData(slugVal);
+      // Navigate back to landing
+      currentPage.set('landing');
+      history.pushState(null, '', '/');
+      showToast('Left group', 'info');
     } catch (e) {
-      alert('Failed to cancel: ' + e.message);
+      showToast('Failed to leave: ' + e.message, 'error');
+    }
+  }
+
+  async function onConfirmCancel() {
+    if (confirmDialog.action === 'cancelPayment') {
+      const payId = confirmDialog.payId;
+      confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' };
+      if (!payId) return;
+      const token = getToken(slug);
+      try {
+        await api.del(`/api/payments/${payId}`, token);
+        const [pays, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/payments`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        payments = pays;
+        balances = bals;
+        showToast('Payment cancelled', 'info');
+      } catch (e) {
+        showToast('Failed to cancel: ' + e.message, 'error');
+      }
+    } else if (confirmDialog.action === 'deleteExpense') {
+      const expId = confirmDialog.expId;
+      confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' };
+      if (!expId) return;
+      const token = getToken(slug);
+      try {
+        await api.del(`/api/expenses/${expId}`, token);
+        const [exps, bals] = await Promise.all([
+          api.get(`/api/groups/${slug}/expenses`, token),
+          api.get(`/api/groups/${slug}/balances`, token),
+        ]);
+        expenses = exps;
+        balances = bals;
+        showToast('Expense deleted', 'success');
+      } catch (e) {
+        showToast('Failed to delete: ' + e.message, 'error');
+      }
     }
   }
 
@@ -267,7 +785,19 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       loadAll({ silent: true });
     });
 
+    const unsubOnline = online.subscribe(async ($online) => {
+      if ($online && s) {
+        const localOps = await getLocalOps(s);
+        if (localOps.length > 0) {
+          await syncGroup(s);
+          await loadAll();
+        }
+      }
+    });
+
     return () => {
+      _reloading = false;
+      unsubOnline();
       loadGen++;
       setOnUpdate(null);
       wsDisconnect();
@@ -282,6 +812,8 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
 </script>
 
+<div class="detail-page" use:swipeBack={{ onBack }}>
+  <div class="detail-scroll" use:pullToRefresh={{ onRefresh: loadAll }}>
 {#if loading}
   <div class="empty-state"><span class="spinner"></span> Loading group…</div>
 {:else if error}
@@ -289,18 +821,53 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   <button class="btn" onclick={loadAll}>Retry</button>
 {:else if group}
   <div class="detail-header">
-    <button class="btn btn-sm" onclick={onBack}>&larr; Back</button>
+    <button class="btn btn-sm" onclick={onBack} use:haptic>&larr; Back</button>
     <div class="detail-header-info">
-      <h2 class="detail-title">{group.name}</h2>
+      {#if renaming}
+        <form onsubmit={handleRenameSubmit} class="rename-form">
+          <div class="rename-row">
+            <input
+              use:scrollIntoViewOnFocus
+              class="form-input rename-input"
+              type="text"
+              bind:value={renameValue}
+              required
+              disabled={expCreating || payCreating}
+              autofocus
+              aria-label="Group name"
+            />
+            <button type="submit" class="btn btn-sm btn-primary" use:haptic aria-label="Save name">Save</button>
+            <button type="button" class="btn btn-sm" onclick={() => renaming = false} use:haptic aria-label="Cancel rename">Cancel</button>
+          </div>
+        </form>
+      {:else}
+        <div class="detail-title" role="button" tabindex="0" onclick={() => startRenaming()} onkeydown={(e) => e.key === 'Enter' && startRenaming()} title="Click to rename">
+          {group.name}
+        </div>
+      {/if}
       <div class="member-chips">
         {#each members as m}
           <span class="member-chip" title={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</span>
         {/each}
       </div>
+      <div class="header-balance">
+        {#if netBalance !== null}
+          {#if netBalance > 0}
+            <span class="badge badge-success">You're owed ${netBalance.toFixed(2)}</span>
+          {:else if netBalance < 0}
+            <span class="badge badge-warning">You owe ${Math.abs(netBalance).toFixed(2)}</span>
+          {:else}
+            <span class="badge balance-settled">Settled</span>
+          {/if}
+        {/if}
+      </div>
     </div>
-    <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link">
-      Share
-    </button>
+    <div class="detail-header-actions">
+      <button class="btn btn-sm" onclick={() => showShare = true} title="Share invite link" use:haptic>
+        Share
+      </button>
+      <button class="btn btn-sm btn-danger-outline" onclick={handleLeaveGroup} use:haptic>Leave</button>
+    </div>
   </div>
 
   <!-- Tabs -->
@@ -309,47 +876,58 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
       class="tab"
       class:active={activeTab === 'expenses'}
       onclick={() => activeTab = 'expenses'}
+      use:haptic
     >Expenses ({expenses.length})</button>
     <button
       class="tab"
       class:active={activeTab === 'payments'}
       onclick={() => activeTab = 'payments'}
+      use:haptic
     >Payments ({payments.length})</button>
     <button
       class="tab"
       class:active={activeTab === 'balances'}
       onclick={() => activeTab = 'balances'}
+      use:haptic
     >Balance</button>
   </div>
 
   <!-- ==================== EXPENSES TAB ==================== -->
   {#if activeTab === 'expenses'}
     <div class="section-actions">
-      <button class="btn btn-primary btn-sm" onclick={() => showExpForm = !showExpForm}>
+      <button class="btn btn-primary btn-sm" onclick={() => { showExpForm = !showExpForm; if (!showExpForm) editingExpenseId = null; }} use:haptic>
         {showExpForm ? 'Cancel' : '+ Add Expense'}
       </button>
     </div>
 
+    {#if expenses.length > 0}
+      <div class="total-bar">
+        <span class="total-label">Total expenses</span>
+        <span class="total-amount">${totalExpenses.toFixed(2)}</span>
+      </div>
+    {/if}
+
     {#if showExpForm}
       <div class="form-section">
-        <div class="form-section-title">New Expense</div>
+        <div class="form-section-title">{editingExpenseId ? 'Edit Expense' : 'New Expense'}</div>
         {#if expError}
           <div class="alert alert-error">{expError}</div>
         {/if}
         <form onsubmit={handleCreateExpense}>
           <div class="form-group">
             <label class="form-label" for="exp-desc">Description</label>
-            <input id="exp-desc" class="form-input" type="text" placeholder="e.g. Dinner" bind:value={expDesc} required disabled={expCreating} />
+            <input use:scrollIntoViewOnFocus id="exp-desc" class="form-input" type="text" placeholder="e.g. Dinner" bind:value={expDesc} required disabled={expCreating} />
           </div>
           <div class="field-row">
             <div class="form-group">
               <label class="form-label" for="exp-amt">Amount</label>
-              <input id="exp-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={expAmt} required disabled={expCreating} />
+              <input use:scrollIntoViewOnFocus id="exp-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={expAmt} required disabled={expCreating} />
             </div>
             <div class="form-group">
               <label class="form-label" for="exp-split">Split type</label>
-              <select id="exp-split" class="form-select" bind:value={expSplitType} disabled={expCreating} onchange={handleSplitTypeChange}>
+              <select use:scrollIntoViewOnFocus id="exp-split" class="form-select" bind:value={expSplitType} disabled={expCreating} onchange={handleSplitTypeChange}>
                 <option value="equal">Equal</option>
+                <option value="percentage">Percentage</option>
                 <option value="custom">Custom</option>
               </select>
             </div>
@@ -360,7 +938,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             {#each expCustomSplits as split, i}
               <div class="split-row">
                 <span class="uuid-short">{getMemberName(split.user_id)}</span>
-                <input
+                <input use:scrollIntoViewOnFocus
                   class="form-input split-input"
                   type="number"
                   step="0.01"
@@ -371,13 +949,44 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
                 />
               </div>
             {/each}
+            <button type="button" class="btn btn-sm" onclick={splitEqually} use:haptic style="margin-top: 0.25rem;">
+              Split equally
+            </button>
             {#if Math.abs(expCustomSplitsSum - Number(expAmt)) > 0.005}
               <div class="split-warning">Split amounts sum (${fmt(expCustomSplitsSum)}) ≠ total (${fmt(expAmt)})</div>
             {/if}
           {/if}
 
-          <button class="btn btn-primary" type="submit" disabled={expCreating} style="margin-top: 0.5rem;">
-            {expCreating ? 'Adding…' : 'Add Expense'}
+          {#if expSplitType === 'percentage' && expCustomSplits.length > 0}
+            <div class="form-section-title" style="margin-top: 0.75rem;">Split percentages</div>
+            {#each expCustomSplits as split, i}
+              <div class="split-row">
+                <span class="uuid-short">{getMemberName(split.user_id)}</span>
+                <div class="pct-input-wrap">
+                  <input use:scrollIntoViewOnFocus
+                    class="form-input split-input"
+                    type="number"
+                    step="1"
+                    min="0"
+                    max="100"
+                    placeholder="0"
+                    bind:value={expCustomSplits[i].amount}
+                    disabled={expCreating}
+                  />
+                  <span class="pct-suffix">%</span>
+                </div>
+              </div>
+            {/each}
+            <button type="button" class="btn btn-sm" onclick={splitEqually} use:haptic style="margin-top: 0.25rem;">
+              Split equally
+            </button>
+            {#if Math.abs(expPctSum - 100) > 0.5}
+              <div class="split-warning">Percentages sum to {fmt(expPctSum)}% — must be 100%</div>
+            {/if}
+          {/if}
+
+          <button class="btn btn-primary" type="submit", disabled={expCreating} style="margin-top: 0.5rem;" use:haptic>
+            {expCreating ? (editingExpenseId ? 'Updating…' : 'Adding…') : (editingExpenseId ? 'Update Expense' : 'Add Expense')}
           </button>
         </form>
       </div>
@@ -386,29 +995,38 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     {#if expenses.length === 0}
       <div class="empty-state">No expenses yet.</div>
     {:else}
-      {#each expenses as exp}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">{exp.description}</span>
-            <span class="amount">${fmt(exp.amount)}</span>
-          </div>
-          <div class="exp-meta">
-            <span class="badge">paid by {getMemberName(exp.paid_by)}</span>
-            <span class="badge">{exp.split_type}</span>
-            {#if exp.created_at}
-              <span class="list-item-subtitle">{formatDate(exp.created_at)}</span>
+      {#each [...expenses].sort((a, b) => (b.created_at || 0) - (a.created_at || 0)) as exp}
+        <div class="swipe-container" use:swipeReveal={{ onAction: () => handleDeleteExpense(exp.id), actionLabel: 'Delete', actionVariant: 'danger' }}>
+          <div class="swipe-content card">
+            <div class="card-header">
+              <span class="card-title">{exp.description}</span>
+              <div class="card-header-right">
+                <button class="btn btn-sm btn-edit" onclick={() => startEditExpense(exp)} use:haptic aria-label="Edit expense">Edit</button>
+                <span class="amount">${fmt(exp.amount)}</span>
+              </div>
+            </div>
+            <div class="exp-meta">
+              <span class="badge">paid by {getMemberName(exp.paid_by)}</span>
+              <span class="badge">{exp.split_type}</span>
+              {#if exp.created_at}
+                <span class="list-item-subtitle">{formatDate(exp.created_at)}</span>
+              {/if}
+              {#if exp._pending}
+                <span class="badge badge-warning" title="Not yet synced">Pending</span>
+              {/if}
+            </div>
+            {#if exp.splits && exp.splits.length > 0}
+              <div class="split-list">
+                {#each exp.splits as split}
+                  <div class="split-item">
+                    <span class="uuid-short">{getMemberName(split.user_id)}</span>
+                    <span class="amount">${fmt(split.amount)}</span>
+                  </div>
+                {/each}
+              </div>
             {/if}
           </div>
-          {#if exp.splits && exp.splits.length > 0}
-            <div class="split-list">
-              {#each exp.splits as split}
-                <div class="split-item">
-                  <span class="uuid-short">{getMemberName(split.user_id)}</span>
-                  <span class="amount">${fmt(split.amount)}</span>
-                </div>
-              {/each}
-            </div>
-          {/if}
+          <div class="swipe-action"></div>
         </div>
       {/each}
     {/if}
@@ -416,14 +1034,21 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
   <!-- ==================== PAYMENTS TAB ==================== -->
   {:else if activeTab === 'payments'}
     <div class="section-actions">
-      <button class="btn btn-primary btn-sm" onclick={() => showPayForm = !showPayForm}>
+      <button class="btn btn-primary btn-sm" onclick={() => { showPayForm = !showPayForm; if (!showPayForm) editingPaymentId = null; }} use:haptic>
         {showPayForm ? 'Cancel' : '+ Record Payment'}
       </button>
     </div>
 
+    {#if payments.length > 0}
+      <div class="total-bar">
+        <span class="total-label">Total payments (confirmed)</span>
+        <span class="total-amount">${totalPayments.toFixed(2)}</span>
+      </div>
+    {/if}
+
     {#if showPayForm}
       <div class="form-section">
-        <div class="form-section-title">Record Payment</div>
+        <div class="form-section-title">{editingPaymentId ? 'Edit Payment' : 'Record Payment'}</div>
         {#if payError}
           <div class="alert alert-error">{payError}</div>
         {/if}
@@ -435,7 +1060,7 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
             </div>
             <div class="form-group">
               <label class="form-label" for="pay-to">To (recipient)</label>
-              <select id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
+              <select use:scrollIntoViewOnFocus id="pay-to" class="form-select" bind:value={payTo} required disabled={payCreating}>
                 <option value="">Select recipient</option>
                 {#each members as m}
                   <option value={m.id}>{m.name}{m.id === currentMemberId ? ' (you)' : ''}</option>
@@ -446,15 +1071,15 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
           <div class="field-row">
             <div class="form-group">
               <label class="form-label" for="pay-amt">Amount</label>
-              <input id="pay-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={payAmt} required disabled={payCreating} />
+              <input use:scrollIntoViewOnFocus id="pay-amt" class="form-input" type="number" step="0.01" min="0.01" placeholder="0.00" bind:value={payAmt} required disabled={payCreating} />
             </div>
             <div class="form-group">
               <label class="form-label" for="pay-method">Method (optional)</label>
-              <input id="pay-method" class="form-input" type="text" placeholder="e.g. Venmo" bind:value={payMethod} disabled={payCreating} />
+              <input use:scrollIntoViewOnFocus id="pay-method" class="form-input" type="text" placeholder="e.g. Venmo" bind:value={payMethod} disabled={payCreating} />
             </div>
           </div>
-          <button class="btn btn-primary" type="submit" disabled={payCreating}>
-            {payCreating ? 'Recording…' : 'Record Payment'}
+          <button class="btn btn-primary" type="submit" disabled={payCreating} use:haptic>
+            {payCreating ? (editingPaymentId ? 'Updating…' : 'Recording…') : (editingPaymentId ? 'Update Payment' : 'Record Payment')}
           </button>
         </form>
       </div>
@@ -463,140 +1088,144 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     {#if payments.length === 0}
       <div class="empty-state">No payments recorded yet.</div>
     {:else}
-      {#each payments as pay}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">{getMemberName(pay.from_user)} &rarr; {getMemberName(pay.to_user)}</span>
-            <span class="amount">${fmt(pay.amount)}</span>
-          </div>
-          <div class="exp-meta">
-            {#if pay.status === 'confirmed'}
-              <span class="badge badge-success">confirmed</span>
-            {:else}
-              <span class="badge badge-warning">pending</span>
-            {/if}
-            {#if pay.method}
-              <span class="badge">{pay.method}</span>
-            {/if}
-            {#if pay.created_at}
-              <span class="list-item-subtitle">{formatDate(pay.created_at)}</span>
-            {/if}
-          </div>
-          {#if pay.status === 'pending'}
-            <div class="pay-actions">
-              {#if currentMemberId && pay.to_user === currentMemberId}
-                <button class="btn btn-sm btn-primary" onclick={() => handleConfirmPayment(pay.id)}>Confirm</button>
-              {/if}
-              <button class="btn btn-sm btn-danger" onclick={() => handleCancelPayment(pay.id)}>Cancel</button>
+      {#each [...payments].sort((a, b) => (b.created_at || 0) - (a.created_at || 0)) as pay}
+        <div class="swipe-container" use:swipeReveal={{ onAction: () => handleCancelPayment(pay.id), actionLabel: 'Cancel', actionVariant: 'danger' }}>
+          <div class="swipe-content card">
+            <div class="card-header">
+              <span class="card-title">{getMemberName(pay.from_user)} &rarr; {getMemberName(pay.to_user)}</span>
+              <div class="card-header-right">
+                {#if pay.status === 'pending' && pay.from_user === currentMemberId}
+                  <button class="btn btn-sm btn-edit" onclick={() => startEditPayment(pay)} use:haptic aria-label="Edit payment">Edit</button>
+                {/if}
+                <span class="amount">${fmt(pay.amount)}</span>
+              </div>
             </div>
-          {/if}
+            <div class="exp-meta">
+              {#if pay.status === 'confirmed'}
+                <span class="badge badge-success">confirmed</span>
+              {:else}
+                <span class="badge badge-warning">pending</span>
+              {/if}
+              {#if pay.method}
+                <span class="badge">{pay.method}</span>
+              {/if}
+              {#if pay.created_at}
+                <span class="list-item-subtitle">{formatDate(pay.created_at)}</span>
+              {/if}
+              {#if pay._pending}
+                <span class="badge badge-warning" title="Not yet synced">Pending</span>
+              {/if}
+            </div>
+            {#if pay.status === 'pending'}
+              <div class="pay-actions">
+                {#if currentMemberId && pay.to_user === currentMemberId}
+                  <button class="btn btn-sm btn-primary" onclick={() => handleConfirmPayment(pay.id)} use:haptic>Confirm</button>
+                {/if}
+                <button class="btn btn-sm btn-danger" onclick={() => handleCancelPayment(pay.id)} use:haptic>Cancel</button>
+              </div>
+            {/if}
+          </div>
+          <div class="swipe-action"></div>
         </div>
       {/each}
     {/if}
 
   <!-- ==================== BALANCES TAB ==================== -->
   {:else if activeTab === 'balances'}
-    {#if (!balances.members || balances.members.length === 0) && (!balances.payments || balances.payments.length === 0) && (!balances.settlements || balances.settlements.length === 0)}
+    {#if spendingSummary.length > 0}
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Spending Summary</span>
+        </div>
+        <div class="spending-list">
+          {#each spendingSummary as person}
+            <div class="spending-row" class:spending-you={person.isYou}>
+              <div class="spending-name">
+                {person.name}{person.isYou ? ' (you)' : ''}
+              </div>
+              <div class="spending-numbers">
+                <span class="spending-paid">Paid ${person.paid.toFixed(2)}</span>
+                <span class="spending-owes">Owes ${person.owes.toFixed(2)}</span>
+              </div>
+              <div class="spending-net" class:amount-positive={person.net >= 0} class:amount-negative={person.net < 0}>
+                {person.net >= 0 ? '+' : ''}${person.net.toFixed(2)}
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+    {#if balances.length === 0}
       <div class="empty-state">
         <p>All balanced up!</p>
-        <p style="margin-top: 0.25rem; font-size: 0.85rem;">No expenses or payments yet.</p>
+        <p style="margin-top: 0.25rem; font-size: 0.85rem;">No outstanding balances.</p>
       </div>
     {:else}
-      {#if balances.members && balances.members.length > 0}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">Net Position</span>
-          </div>
-          <div class="member-bal-list">
-            {#each balances.members as m}
-              <div class="member-bal-item">
-                <span>{getMemberName(m.user_id)}</span>
-                <span class="amount" class:amount-positive={m.balance > 0.01} class:amount-negative={m.balance < -0.01}>
-                  {m.balance > 0 ? '+' : ''}{fmt(m.balance)}
-                </span>
-              </div>
-            {/each}
-          </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Balance Breakdown</span>
         </div>
-      {/if}
-
-      {#if balances.payments && balances.payments.length > 0}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">Payments Made</span>
-          </div>
-          <div class="payments-list">
-            {#each balances.payments as pay}
-              <div class="payment-item-inline">
-                <div class="payment-item-main">
-                  <span class="payment-direction">{getMemberName(pay.from)} &rarr; {getMemberName(pay.to)}</span>
-                  <span class="amount">${fmt(pay.amount)}</span>
+        <div class="bal-list">
+          {#each balances as bal}
+            <div class="bal-item">
+              <div class="bal-main">
+                <div class="bal-direction">
+                  <span class="uuid-short">{getMemberName(bal.from)}</span>
+                  <span class="bal-arrow">&rarr;</span>
+                  <span class="uuid-short">{getMemberName(bal.to)}</span>
                 </div>
-                <div class="payment-meta">
-                  {#if pay.status === 'confirmed'}
-                    <span class="badge badge-success">confirmed</span>
-                  {:else}
-                    <span class="badge badge-warning">pending</span>
-                  {/if}
-                  {#if pay.method}
-                    <span class="badge">{pay.method}</span>
-                  {/if}
-                </div>
+                <span class="amount amount-negative">${fmt(bal.amount)}</span>
               </div>
-            {/each}
-          </div>
-        </div>
-      {/if}
-
-      {#if balances.settlements && balances.settlements.length > 0}
-        <div class="card">
-          <div class="card-header">
-            <span class="card-title">Recommended Settlements</span>
-          </div>
-          <div class="bal-list">
-            {#each balances.settlements as bal}
-              <div class="bal-item">
-                <div class="bal-main">
-                  <div class="bal-direction">
-                    <span class="uuid-short">{getMemberName(bal.from)}</span>
-                    <span class="bal-arrow">&rarr;</span>
-                    <span class="uuid-short">{getMemberName(bal.to)}</span>
-                  </div>
-                  <span class="amount amount-negative">${fmt(bal.amount)}</span>
+              {#if bal.breakdown && bal.breakdown.length > 0}
+                <div class="bal-breakdown">
+                  {#each bal.breakdown as b}
+                    <div class="bal-breakdown-item">
+                      <span class="bal-breakdown-name">{b.expense_name}</span>
+                      <span class="bal-breakdown-amt" class:negative={b.amount < 0}>{b.amount < 0 ? '-$' : '$'}{fmt(Math.abs(b.amount))}</span>
+                    </div>
+                  {/each}
                 </div>
-                {#if bal.breakdown && bal.breakdown.length > 0}
-                  <div class="bal-breakdown">
-                    {#each bal.breakdown as b}
-                      <div class="bal-breakdown-item">
-                        <span class="bal-breakdown-name">{b.expense_name}{fmtPct(b.percent)}</span>
-                        <span class="bal-breakdown-amt" class:negative={b.amount < 0}>{b.amount < 0 ? '-$' : '$'}{fmt(Math.abs(b.amount))}</span>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
+              {/if}
+            </div>
+          {/each}
         </div>
-      {:else}
-        <div class="empty-state" style="margin-top: 1rem;">
-          <p>All settled up!</p>
-        </div>
-      {/if}
+      </div>
     {/if}
   {/if}
+{/if}
+  </div>
+</div>
+
+<!-- FAB -->
+{#if (activeTab === 'expenses' && !showExpForm) || (activeTab === 'payments' && !showPayForm)}
+  <button class="fab" onclick={toggleFabAction} use:haptic aria-label={fabLabel}>
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  </button>
 {/if}
 
 {#if showShare && inviteLink}
   <ShareModal link={inviteLink} onClose={() => showShare = false} />
 {/if}
 
+<BottomSheet
+  show={confirmDialog.show}
+  title={confirmDialog.action === 'deleteExpense' ? 'Delete Expense' : confirmDialog.action === 'leaveGroup' ? 'Leave Group' : 'Cancel Payment'}
+  message={confirmDialog.action === 'deleteExpense' ? 'Are you sure you want to delete this expense?' : confirmDialog.action === 'leaveGroup' ? 'Are you sure you want to leave this group? You can rejoin with an invite link.' : 'Are you sure you want to cancel this payment?'}
+  variant={confirmDialog.action === 'leaveGroup' ? 'default' : 'danger'}
+  confirmText={confirmDialog.action === 'deleteExpense' ? 'Delete' : confirmDialog.action === 'leaveGroup' ? 'Leave Group' : 'Cancel Payment'}
+  onConfirm={confirmDialog.action === 'leaveGroup' ? onConfirmLeaveGroup : onConfirmCancel}
+  onCancel={() => confirmDialog = { show: false, payId: null, expId: null, action: 'cancelPayment' }}
+/>
+
 <style>
   .detail-header {
     display: flex;
     align-items: flex-start;
-    gap: 0.75rem;
-    margin-bottom: 1.25rem;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
   }
 
   .detail-header-info {
@@ -604,14 +1233,92 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     min-width: 0;
   }
 
+  .detail-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .header-balance {
+    margin-top: 0.375rem;
+  }
+
+  .header-balance .badge {
+    font-size: 0.8rem;
+  }
+
+  .balance-settled {
+    background: rgba(63, 185, 80, 0.1);
+    color: var(--success, #3fb950);
+    border-color: rgba(63, 185, 80, 0.2);
+  }
+
+  .btn-danger-outline {
+    background: transparent;
+    border: 1px solid var(--danger, #f85149);
+    color: var(--danger, #f85149);
+  }
+
+  .btn-danger-outline:hover {
+    background: var(--danger, #f85149);
+    color: #fff;
+  }
+
   .detail-title {
     font-size: 1.25rem;
     font-weight: 700;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.375rem;
+    cursor: pointer;
+  }
+
+  .detail-title:focus-visible {
+    outline: 2px solid var(--accent, #58a6ff);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  .rename-form {
+    margin-bottom: 0.375rem;
+  }
+
+  .rename-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .rename-input {
+    flex: 1;
+    font-size: 1.1rem;
+    font-weight: 700;
+    padding: 0.375rem 0.5rem;
+    min-height: auto;
   }
 
   .section-actions {
-    margin-bottom: 1rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .card-header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .btn-edit {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    min-height: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+  }
+
+  .btn-edit:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .exp-meta {
@@ -640,29 +1347,48 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.625rem;
   }
 
   .split-input {
     width: 120px;
     flex-shrink: 0;
+    min-height: var(--touch-target, 44px);
   }
 
   .split-warning {
     color: var(--text-warning, #d97706);
     font-size: 0.85rem;
-    margin-top: 0.25rem;
+    margin-bottom: 0.375rem;
     font-weight: 500;
+  }
+
+  .pct-input-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .pct-input-wrap .split-input {
+    padding-right: 1.5rem;
+  }
+
+  .pct-suffix {
+    position: absolute;
+    right: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    pointer-events: none;
   }
 
   .form-static-value {
     padding: 0.5rem 0.75rem;
-    background: var(--bg-muted, var(--bg));
+    background: var(--bg-primary, var(--bg));
     border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 0.9rem;
-    color: var(--text);
-    min-height: 38px;
+    color: var(--text-primary);
+    min-height: var(--touch-target, 44px);
     display: flex;
     align-items: center;
   }
@@ -733,52 +1459,148 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
     color: var(--text-danger, #c0392b);
   }
 
-  .member-bal-list {
+  .spending-list {
     display: flex;
     flex-direction: column;
   }
 
-  .member-bal-item {
+  .spending-row {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    padding: 0.4rem 0;
-    font-size: 0.9rem;
-    border-bottom: 1px solid var(--border-subtle, var(--border));
+    justify-content: space-between;
+    padding: 0.625rem 0;
+    border-bottom: 1px solid var(--border);
+    gap: 0.5rem;
   }
 
-  .member-bal-item:last-child {
+  .spending-row:last-child {
     border-bottom: none;
   }
 
-  .payments-list {
-    display: flex;
-    flex-direction: column;
+  .spending-you {
+    background: rgba(88, 166, 255, 0.04);
+    margin: 0 -1.25rem;
+    padding: 0.625rem 1.25rem;
   }
 
-  .payment-item-inline {
+  .spending-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    min-width: 80px;
+  }
+
+  .spending-numbers {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    text-align: right;
+    flex: 1;
+  }
+
+  .spending-paid {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .spending-owes {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+
+  .spending-net {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 1rem;
+    min-width: 80px;
+    text-align: right;
+  }
+
+  .swipe-container {
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 1rem;
+  }
+
+  .swipe-content {
+    position: relative;
+    z-index: 1;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    will-change: transform;
+  }
+
+  .swipe-action {
+    position: absolute;
+    right: 0;
+    top: 0;
+    height: 100%;
+  }
+
+  .detail-page {
+    position: relative;
+    overflow: hidden;
+    min-height: calc(100dvh - 5rem);
+  }
+
+  .detail-scroll {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    max-height: calc(100dvh - 5rem);
+  }
+
+  .fab {
+    position: fixed;
+    bottom: calc(1.5rem + var(--safe-bottom, 0px));
+    right: calc(1.5rem + var(--safe-right, 0px));
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--accent-dim, #1f6feb);
+    border: none;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 30;
+    transition: transform 0.15s, background 0.15s, box-shadow 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .fab:hover {
+    background: var(--accent, #58a6ff);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+  }
+
+  .fab:active {
+    transform: scale(0.92);
+  }
+
+  .fab svg {
+    display: block;
+  }
+
+  .total-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     padding: 0.5rem 0;
-    border-bottom: 1px solid var(--border-subtle, var(--border));
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid var(--border);
   }
 
-  .payment-item-inline:last-child {
-    border-bottom: none;
+  .total-label {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    font-weight: 500;
   }
 
-  .payment-item-main {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
-  .payment-direction {
-    font-size: 0.9rem;
-  }
-
-  .payment-meta {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    margin-top: 0.25rem;
+  .total-amount {
+    font-family: var(--font-mono);
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
   }
 </style>

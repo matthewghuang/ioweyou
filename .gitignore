@@ -1,0 +1,27 @@
+# SQLite database files
+data.db
+data.db-wal
+data.db-shm
+
+# Compiled binary
+/ioweyou
+server
+
+# Node artifacts (stray root installs)
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

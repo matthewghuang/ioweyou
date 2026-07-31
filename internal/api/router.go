@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 
 	"github.com/go-chi/chi/v5"
@@ -36,13 +37,29 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 	// CORS
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Group-Token")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Group-Token, Authorization")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(204)
 				return
 			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	// CSP
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Security-Policy",
+				"default-src 'self'; "+
+					"script-src 'self'; "+
+					"style-src 'self' 'unsafe-inline'; "+
+					"connect-src 'self' ws: wss:; "+
+					"img-src 'self' data:; "+
+					"font-src 'self'; "+
+					"frame-ancestors 'none'; "+
+					"base-uri 'self'")
 			next.ServeHTTP(w, r)
 		})
 	})
@@ -61,6 +78,7 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 
 		r.Get("/api/groups/{slug}", GetGroup(s))
 		r.Patch("/api/groups/{slug}", UpdateGroup(s))
+		r.Delete("/api/groups/{slug}/members/me", LeaveGroup(s))
 
 		// Expenses
 		r.Post("/api/groups/{slug}/expenses", CreateExpense(s))
@@ -73,6 +91,7 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 		r.Post("/api/groups/{slug}/payments", CreatePayment(s))
 		r.Get("/api/groups/{slug}/payments", ListPayments(s))
 		r.Get("/api/payments/{id}", GetPayment(s))
+		r.Patch("/api/payments/{id}", UpdatePayment(s))
 		r.Post("/api/payments/{id}/confirm", ConfirmPayment(s))
 		r.Delete("/api/payments/{id}", CancelPayment(s))
 
@@ -90,13 +109,26 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 			absDir, _ := filepath.Abs(staticDir)
 			log.Printf("serving frontend from %s", absDir)
 
-			// Serve static assets directly
+			// Serve /assets/ files directly
 			r.Get("/assets/*", func(w http.ResponseWriter, r *http.Request) {
 				http.StripPrefix("/assets/", http.FileServer(http.Dir(filepath.Join(absDir, "assets")))).ServeHTTP(w, r)
 			})
 
-			// All other non-API, non-WS routes → index.html (SPA fallback)
+			// All other requests (non-API, non-WS) — try real file first, then SPA fallback
 			r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+				// Clean the request path and resolve to an absolute path
+				cleanedPath := filepath.Clean(r.URL.Path)
+				fullPath := filepath.Join(absDir, cleanedPath)
+				// Verify the resolved path is within absDir (prevents path traversal)
+				if !strings.HasPrefix(fullPath, absDir) {
+					http.NotFound(w, r)
+					return
+				}
+				if info, err := os.Stat(fullPath); err == nil && !info.IsDir() {
+					http.ServeFile(w, r, fullPath)
+					return
+				}
+				// SPA fallback for client-side routes
 				http.ServeFile(w, r, filepath.Join(absDir, "index.html"))
 			})
 		} else {

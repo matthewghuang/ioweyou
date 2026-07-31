@@ -9,17 +9,13 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  workers: 1, // sequential — each test shares the same backend
+  workers: 1, // sequential — each test shares the same backend database
   reporter: process.env.CI ? 'github' : 'list',
 
   use: {
     baseURL: BASE_URL,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
-    // Expose backend URL so helpers can reach it
-    extraHTTPHeaders: {
-      'x-test-backend': BACKEND_URL,
-    },
   },
 
   projects: [
@@ -27,17 +23,15 @@ export default defineConfig({
       name: 'chromium',
       use: {
         ...devices['Desktop Chrome'],
-        // Dark theme matches the app's default
+        colorScheme: 'dark',
+      },
+    },
+    {
+      name: 'Mobile Safari',
+      use: {
+        ...devices['iPhone 14'],
         colorScheme: 'dark',
       },
     },
   ],
-
-  webServer: process.env.CI
-    ? []
-    : [
-        // Expect the developer to run the backend and frontend themselves
-        // when running locally (`npm run dev` in one terminal, `go run .` in another).
-        // CI pipelines should start both before `npx playwright test`.
-      ],
 });

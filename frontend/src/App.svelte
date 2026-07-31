@@ -1,13 +1,16 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { currentPage, currentGroupSlug } from './lib/stores.js';
+  import { haptic } from './lib/haptic.js';
   import { clearAllTokens, getAllGroups, getToken } from './lib/api.js';
   import { disconnect, unsubscribe } from './lib/websocket.js';
 
   import Landing from './pages/Landing.svelte';
   import Join from './pages/Join.svelte';
   import Groups from './pages/Groups.svelte';
-  import GroupDetail from './pages/GroupDetail.svelte';
+  let GroupDetailComponent = $state(null);
+  import ToastContainer from './lib/ToastContainer.svelte';
+  import OfflineBanner from './lib/OfflineBanner.svelte';
 
   let loading = $state(true);
 
@@ -107,9 +110,15 @@
     currentPage.set('groups');
   }
 
-  function handleJoinGroup() {
-    history.pushState(null, '', '/groups');
-    currentPage.set('groups');
+  function handleJoinGroup(data) {
+    if (data && data.slug) {
+      currentGroupSlug.set(data.slug);
+      history.pushState(null, '', `/groups/${data.slug}`);
+      currentPage.set('group');
+    } else {
+      history.pushState(null, '', '/groups');
+      currentPage.set('groups');
+    }
   }
 
   function handleSelectGroup(slug) {
@@ -117,6 +126,14 @@
     history.pushState(null, '', `/groups/${slug}`);
     currentPage.set('group');
   }
+
+  $effect(() => {
+    if ($currentPage === 'group' && !GroupDetailComponent) {
+      import('./pages/GroupDetail.svelte').then(mod => {
+        GroupDetailComponent = mod.default;
+      });
+    }
+  });
 
   function handleBackToGroups() {
     unsubscribe();
@@ -139,9 +156,9 @@
   {#if $currentPage !== 'landing' && $currentPage !== 'join'}
     <header class="header">
       <div class="container header-inner">
-        <button class="header-title-btn" onclick={handleGoHome}>I Owe You</button>
+        <button class="header-title-btn" onclick={handleGoHome} use:haptic>I Owe You</button>
         <div class="header-right">
-          <button class="btn btn-sm" onclick={handleLogout}>Logout</button>
+          <button class="btn btn-sm" onclick={handleLogout} use:haptic>Logout</button>
         </div>
       </div>
     </header>
@@ -154,10 +171,19 @@
     {:else if $currentPage === 'groups'}
       <Groups onSelectGroup={handleSelectGroup} />
     {:else if $currentPage === 'group'}
-      <GroupDetail onBack={handleBackToGroups} />
+      {#if GroupDetailComponent}
+        <GroupDetailComponent onBack={handleBackToGroups} />
+      {:else}
+        <div class="empty-state">
+          <span class="spinner"></span> Loading…
+        </div>
+      {/if}
     {/if}
   </main>
 {/if}
+
+<OfflineBanner />
+<ToastContainer />
 
 <style>
   .loading-screen {
@@ -180,10 +206,15 @@
     font-size: 1.1rem;
     font-weight: 700;
     cursor: pointer;
-    padding: 0;
+    padding: 0.375rem 0;
+    min-height: var(--touch-target, 44px);
   }
 
   .header-title-btn:hover {
     color: var(--accent);
+  }
+
+  .header-title-btn:active {
+    opacity: 0.7;
   }
 </style>

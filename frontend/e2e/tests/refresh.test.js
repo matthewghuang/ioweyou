@@ -6,15 +6,10 @@
 // whole page for a spinner (white flash).
 import { test, expect } from '@playwright/test';
 import {
-  apiCreateGroup,
-  apiJoinGroup,
   apiCreateExpense,
-  setGroupAuth,
-  goToGroup,
-  clickButton,
-  fillByLabel,
-  waitForText,
-  expectVisible,
+  createGroup,
+  openGroup,
+  openTab,
 } from '../helpers.js';
 
 /**
@@ -51,70 +46,44 @@ async function expectNoReloadFlash(page) {
 test.describe('Page refresh regression', () => {
   test('adding an expense does not remount the page', async ({ page }) => {
     const groupName = `E2E NoReload Expense ${Date.now()}`;
-    const secret = 'secret';
-
-    const { slug, cookie_token, member_id, internal_id } =
-      await apiCreateGroup(groupName, 'Alice', secret);
-    await apiJoinGroup(slug, 'Bob', secret);
-
-    await setGroupAuth(page, slug, cookie_token, {
-      name: groupName,
-      member_name: 'Alice',
-      member_id,
-      internal_id,
-    });
-    await goToGroup(page, slug);
-    await expectVisible(page, groupName);
+    const session = await createGroup(groupName, ['Bob']);
+    await openGroup(page, session, 'Alice', groupName);
 
     await countLoadingMounts(page);
 
-    await clickButton(page, '+ Add Expense');
-    await fillByLabel(page, 'Description', 'Dinner');
-    await fillByLabel(page, 'Amount', '100');
-    await clickButton(page, 'Add Expense');
+    await page.getByRole('button', { name: '+ Add Expense', exact: true }).click();
+    await page.getByLabel('Description').fill('Dinner');
+    await page.getByLabel('Amount').fill('100');
+    await page.getByRole('button', { name: 'Add Expense', exact: true }).click();
 
-    await waitForText(page, 'Dinner');
-    await expectVisible(page, '$100.00');
+    await expect(page.getByText('Dinner')).toBeVisible();
+    await expect(page.getByText('$100.00').first()).toBeVisible();
     await expectNoReloadFlash(page);
   });
 
   test('recording a payment does not remount the page', async ({ page }) => {
     const groupName = `E2E NoReload Payment ${Date.now()}`;
-    const secret = 'secret';
-
-    const { slug, cookie_token: aliceToken, member_id: aliceId, internal_id } =
-      await apiCreateGroup(groupName, 'Alice', secret);
-    const bob = await apiJoinGroup(slug, 'Bob', secret);
+    const session = await createGroup(groupName, ['Bob']);
+    const alice = session.member('Alice');
+    const bob = session.member('Bob');
 
     // Pre-create an expense so the payment has context
-    await apiCreateExpense(slug, aliceToken, {
-      description: 'Lunch',
-      amount: 100,
-      split_type: 'equal',
-    });
+    await apiCreateExpense(session.slug, alice.cookie_token, { description: 'Lunch', amount: 100, split_type: 'equal' });
 
     // Auth as Bob — the payment "from" is always the current member
-    await setGroupAuth(page, slug, bob.cookie_token, {
-      name: groupName,
-      member_name: 'Bob',
-      member_id: bob.member_id,
-      internal_id,
-    });
-    await goToGroup(page, slug);
-    await expectVisible(page, groupName);
-
-    await page.locator('button.tab').filter({ hasText: 'Payments' }).click();
-    await waitForText(page, /no payments/i);
+    await openGroup(page, session, 'Bob', groupName);
+    await openTab(page, 'Payments');
+    await expect(page.getByText(/no payments/i)).toBeVisible();
 
     await countLoadingMounts(page);
 
-    await clickButton(page, '+ Record Payment');
-    await page.selectOption('#pay-to', aliceId);
-    await fillByLabel(page, 'Amount', '50');
-    await clickButton(page, 'Record Payment');
+    await page.getByRole('button', { name: '+ Record Payment', exact: true }).click();
+    await page.getByLabel('To (recipient)').selectOption(alice.member_id);
+    await page.getByLabel('Amount').fill('50');
+    await page.getByRole('button', { name: 'Record Payment', exact: true }).click();
 
-    await waitForText(page, /pending/i);
-    await expectVisible(page, '$50.00');
+    await expect(page.getByText('pending', { exact: true })).toBeVisible();
+    await expect(page.getByText('$50.00').first()).toBeVisible();
     await expectNoReloadFlash(page);
   });
 });

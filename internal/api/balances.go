@@ -13,7 +13,6 @@ import (
 // BreakdownItem shows how one expense contributes to a balance entry.
 type BreakdownItem struct {
 	ExpenseName string  `json:"expense_name"`
-	Percent     float64 `json:"percent,omitempty"`
 	Amount      float64 `json:"amount"`
 }
 
@@ -23,30 +22,6 @@ type BalanceEntry struct {
 	To        string          `json:"to"`
 	Amount    float64         `json:"amount"`
 	Breakdown []BreakdownItem `json:"breakdown"`
-}
-
-// BalanceMember shows a member's net position in the balance sheet.
-// Positive balance means the member is owed money; negative means they owe.
-type BalanceMember struct {
-	UserID  string  `json:"user_id"`
-	Balance float64 `json:"balance"`
-}
-
-// BalancePayment shows a recorded payment included in the balance sheet.
-type BalancePayment struct {
-	ID     string `json:"id"`
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Amount float64 `json:"amount"`
-	Status string `json:"status"`
-	Method string `json:"method"`
-}
-
-// BalanceResponse is the full balance sheet response.
-type BalanceResponse struct {
-	Members     []BalanceMember  `json:"members"`
-	Payments    []BalancePayment `json:"payments"`
-	Settlements []BalanceEntry   `json:"settlements"`
 }
 
 func GetBalances(s *Server) http.HandlerFunc {
@@ -104,10 +79,8 @@ func GetBalances(s *Server) http.HandlerFunc {
 			toUser      string
 			amount      float64
 			expenseName string
-			expenseTotal float64
 		}
 		var allDebts []debtEdge
-		var collectedPayments []BalancePayment
 
 		for _, docID := range docIDs {
 			state, err := s.Store.GetLatestState(docID)
@@ -143,54 +116,29 @@ func GetBalances(s *Server) http.HandlerFunc {
 					// Track edge for breakdown (skip self-edges)
 					if uid != paidBy && description != "" {
 						allDebts = append(allDebts, debtEdge{
-							fromUser:     uid,
-							toUser:       paidBy,
-							amount:       splitAmt,
-							expenseName:  description,
-							expenseTotal: amount,
+							fromUser:    uid,
+							toUser:      paidBy,
+							amount:      splitAmt,
+							expenseName: description,
 						})
 					}
 				}
 			}
 
-			// Process as payment if it has from_user
-			fromUser, hasFrom := state["from_user"].(string)
-			if hasFrom && fromUser != "" {
+			// Process as confirmed payment if it has from_user, to_user, and status confirmed
+			status, _ := state["status"].(string)
+			if status == "confirmed" {
+				fromUser, _ := state["from_user"].(string)
 				toUser, _ := state["to_user"].(string)
 				amt, _ := state["amount"].(float64)
-				status, _ := state["status"].(string)
-				method, _ := state["method"].(string)
-
-				if toUser != "" && amt > 0 {
-					collectedPayments = append(collectedPayments, BalancePayment{
-						ID:     docID,
-						From:   fromUser,
-						To:     toUser,
-						Amount: math.Round(amt*100) / 100,
-						Status: status,
-						Method: method,
-					})
-
-					// Only confirmed payments affect net balances
-					if status == "confirmed" {
-						balances[fromUser] += amt
-						balances[toUser] -= amt
-					}
+				if fromUser != "" && toUser != "" && amt > 0 {
+					// fromUser paid toUser, so fromUser's net balance increases
+					// (reduces their debt) and toUser's net balance decreases.
+					balances[fromUser] += amt
+					balances[toUser] -= amt
 				}
 			}
 		}
-
-		// Capture member net positions for display
-		var balanceMembers []BalanceMember
-		for uid, bal := range balances {
-			balanceMembers = append(balanceMembers, BalanceMember{
-				UserID:  uid,
-				Balance: math.Round(bal*100) / 100,
-			})
-		}
-		sort.Slice(balanceMembers, func(i, j int) bool {
-			return balanceMembers[i].UserID < balanceMembers[j].UserID
-		})
 
 		// --- Build balance / settlement recommendations ---
 		var debtors, creditors []string
@@ -240,21 +188,13 @@ func GetBalances(s *Server) http.HandlerFunc {
 			for _, d := range forward {
 				amt := math.Round(d.amount*scale*100) / 100
 				if amt >= 0.01 {
-					pct := 0.0
-					if d.expenseTotal > 0 {
-						pct = math.Round(d.amount/d.expenseTotal*100*100) / 100
-					}
-					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Percent: pct, Amount: amt})
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: amt})
 				}
 			}
 			for _, d := range reverse {
 				amt := math.Round(d.amount*scale*100) / 100
 				if amt >= 0.01 {
-					pct := 0.0
-					if d.expenseTotal > 0 {
-						pct = math.Round(d.amount/d.expenseTotal*100*100) / 100
-					}
-					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Percent: pct, Amount: -amt})
+					items = append(items, BreakdownItem{ExpenseName: d.expenseName, Amount: -amt})
 				}
 			}
 
@@ -299,13 +239,6 @@ func GetBalances(s *Server) http.HandlerFunc {
 		if settlements == nil {
 			settlements = []BalanceEntry{}
 		}
-		if collectedPayments == nil {
-			collectedPayments = []BalancePayment{}
-		}
-		respondOK(w, BalanceResponse{
-			Members:     balanceMembers,
-			Payments:    collectedPayments,
-			Settlements: settlements,
-		})
+		respondOK(w, settlements)
 	}
 }
