@@ -11,7 +11,7 @@
   let members = $state([]);
   let expenses = $state([]);
   let payments = $state([]);
-  let balances = $state([]);
+  let balances = $state({ members: [], payments: [], settlements: [] });
   let loading = $state(true);
   let error = $state('');
   let activeTab = $state('expenses');
@@ -479,41 +479,93 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   <!-- ==================== BALANCES TAB ==================== -->
   {:else if activeTab === 'balances'}
-    {#if balances.length === 0}
+    {#if (!balances.members || balances.members.length === 0) && (!balances.payments || balances.payments.length === 0) && (!balances.settlements || balances.settlements.length === 0)}
       <div class="empty-state">
         <p>All balanced up!</p>
-        <p style="margin-top: 0.25rem; font-size: 0.85rem;">No outstanding balances.</p>
+        <p style="margin-top: 0.25rem; font-size: 0.85rem;">No expenses or payments yet.</p>
       </div>
     {:else}
-      <div class="card">
-        <div class="card-header">
-          <span class="card-title">Balance Breakdown</span>
-        </div>
-        <div class="bal-list">
-          {#each balances as bal}
-            <div class="bal-item">
-              <div class="bal-main">
-                <div class="bal-direction">
-                  <span class="uuid-short">{getMemberName(bal.from)}</span>
-                  <span class="bal-arrow">&rarr;</span>
-                  <span class="uuid-short">{getMemberName(bal.to)}</span>
-                </div>
-                <span class="amount amount-negative">${fmt(bal.amount)}</span>
+      {#if balances.members && balances.members.length > 0}
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Net Position</span>
+          </div>
+          <div class="member-bal-list">
+            {#each balances.members as m}
+              <div class="member-bal-item">
+                <span>{getMemberName(m.user_id)}</span>
+                <span class="amount" class:amount-positive={m.balance > 0.01} class:amount-negative={m.balance < -0.01}>
+                  {m.balance > 0 ? '+' : ''}{fmt(m.balance)}
+                </span>
               </div>
-              {#if bal.breakdown && bal.breakdown.length > 0}
-                <div class="bal-breakdown">
-                  {#each bal.breakdown as b}
-                    <div class="bal-breakdown-item">
-                      <span class="bal-breakdown-name">{b.expense_name}</span>
-                      <span class="bal-breakdown-amt" class:negative={b.amount < 0}>{b.amount < 0 ? '-$' : '$'}{fmt(Math.abs(b.amount))}</span>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/each}
+            {/each}
+          </div>
         </div>
-      </div>
+      {/if}
+
+      {#if balances.payments && balances.payments.length > 0}
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Payments Made</span>
+          </div>
+          <div class="payments-list">
+            {#each balances.payments as pay}
+              <div class="payment-item-inline">
+                <div class="payment-item-main">
+                  <span class="payment-direction">{getMemberName(pay.from)} &rarr; {getMemberName(pay.to)}</span>
+                  <span class="amount">${fmt(pay.amount)}</span>
+                </div>
+                <div class="payment-meta">
+                  {#if pay.status === 'confirmed'}
+                    <span class="badge badge-success">confirmed</span>
+                  {:else}
+                    <span class="badge badge-warning">pending</span>
+                  {/if}
+                  {#if pay.method}
+                    <span class="badge">{pay.method}</span>
+                  {/if}
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
+      {#if balances.settlements && balances.settlements.length > 0}
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Recommended Settlements</span>
+          </div>
+          <div class="bal-list">
+            {#each balances.settlements as bal}
+              <div class="bal-item">
+                <div class="bal-main">
+                  <div class="bal-direction">
+                    <span class="uuid-short">{getMemberName(bal.from)}</span>
+                    <span class="bal-arrow">&rarr;</span>
+                    <span class="uuid-short">{getMemberName(bal.to)}</span>
+                  </div>
+                  <span class="amount amount-negative">${fmt(bal.amount)}</span>
+                </div>
+                {#if bal.breakdown && bal.breakdown.length > 0}
+                  <div class="bal-breakdown">
+                    {#each bal.breakdown as b}
+                      <div class="bal-breakdown-item">
+                        <span class="bal-breakdown-name">{b.expense_name}</span>
+                        <span class="bal-breakdown-amt" class:negative={b.amount < 0}>{b.amount < 0 ? '-$' : '$'}{fmt(Math.abs(b.amount))}</span>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </div>
+      {:else}
+        <div class="empty-state" style="margin-top: 1rem;">
+          <p>All settled up!</p>
+        </div>
+      {/if}
     {/if}
   {/if}
 {/if}
@@ -662,5 +714,54 @@ let expCustomSplitsSum = $derived(expCustomSplits.reduce((s, x) => s + Number(x.
 
   .bal-breakdown-amt.negative {
     color: var(--text-danger, #c0392b);
+  }
+
+  .member-bal-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .member-bal-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.4rem 0;
+    font-size: 0.9rem;
+    border-bottom: 1px solid var(--border-subtle, var(--border));
+  }
+
+  .member-bal-item:last-child {
+    border-bottom: none;
+  }
+
+  .payments-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .payment-item-inline {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border-subtle, var(--border));
+  }
+
+  .payment-item-inline:last-child {
+    border-bottom: none;
+  }
+
+  .payment-item-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .payment-direction {
+    font-size: 0.9rem;
+  }
+
+  .payment-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-top: 0.25rem;
   }
 </style>
