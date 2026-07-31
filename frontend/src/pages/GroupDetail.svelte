@@ -20,7 +20,7 @@ import { scrollIntoViewOnFocus } from '../lib/forms.js';
   let members = $state([]);
   let expenses = $state([]);
   let payments = $state([]);
-  let balances = $state([]);
+  let balances = $state({ members: [], payments: [], settlements: [] });
   let loading = $state(true);
   let error = $state('');
   let activeTab = $state('expenses');
@@ -224,16 +224,24 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
 
   // ---- Data loading ----
 
-  async function loadAll() {
+  // silent: background refresh (e.g. WS change) — never flips `loading` (which
+  // swaps the whole page for the spinner) and never replaces healthy data with
+  // an error on a transient fetch failure.
+  async function loadAll(opts = {}) {
+    const silent = !!opts.silent;
     if (!slug) return;
     if (_reloading) return;
     _reloading = true;
-    error = '';
-    loading = true;
+    if (!silent) {
+      error = '';
+      loading = true;
+    }
     const token = getToken(slug);
     if (!token) {
-      error = 'Not authenticated for this group';
-      loading = false;
+      if (!silent) {
+        error = 'Not authenticated for this group';
+        loading = false;
+      }
       _reloading = false;
       return;
     }
@@ -251,6 +259,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
       ]);
       const [g, exps, pays, bals] = data;
       if (gen !== loadGen) { _reloading = false; return; }
+      error = ''; // fresh data supersedes any prior error
       group = g;
       members = g.members || [];
       expenses = exps;
@@ -262,7 +271,9 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
       }
     } catch (e) {
       if (gen !== loadGen) { _reloading = false; return; }
-      error = e.message;
+      // Background refresh failed: keep the last good data on screen;
+      // only a foreground load surfaces the error.
+      if (!silent) error = e.message;
     } finally {
       if (gen === loadGen) {
         loading = false;
@@ -771,7 +782,7 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
       subscribe(info.internal_id);
     }
     setOnUpdate(() => {
-      loadAll();
+      loadAll({ silent: true });
     });
 
     const unsubOnline = online.subscribe(async ($online) => {
