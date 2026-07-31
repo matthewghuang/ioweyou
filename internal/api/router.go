@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 
 	"github.com/go-chi/chi/v5"
@@ -115,10 +116,16 @@ func NewRouter(s *Server, staticDir string) http.Handler {
 
 			// All other requests (non-API, non-WS) — try real file first, then SPA fallback
 			r.NotFound(func(w http.ResponseWriter, r *http.Request) {
-				// Check if the requested path matches a real file in the dist directory
-				filePath := filepath.Join(absDir, r.URL.Path)
-				if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
-					http.ServeFile(w, r, filePath)
+				// Clean the request path and resolve to an absolute path
+				cleanedPath := filepath.Clean(r.URL.Path)
+				fullPath := filepath.Join(absDir, cleanedPath)
+				// Verify the resolved path is within absDir (prevents path traversal)
+				if !strings.HasPrefix(fullPath, absDir) {
+					http.NotFound(w, r)
+					return
+				}
+				if info, err := os.Stat(fullPath); err == nil && !info.IsDir() {
+					http.ServeFile(w, r, fullPath)
 					return
 				}
 				// SPA fallback for client-side routes
