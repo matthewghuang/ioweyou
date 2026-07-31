@@ -1540,14 +1540,14 @@ let totalPayments = $derived(payments.filter(p => p.status === 'confirmed').redu
   .detail-page {
     position: relative;
     overflow: hidden;
-    min-height: calc(100dvh - 5rem);
+    height: 100%;
   }
 
   .detail-scroll {
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
-    max-height: calc(100dvh - 5rem);
+    height: 100%;
   }
 
   .fab {
