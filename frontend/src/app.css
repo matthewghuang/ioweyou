@@ -50,13 +50,10 @@ body {
 }  
 
 #app {
-  min-height: 100vh;
-  min-height: 100dvh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
   padding-bottom: var(--safe-bottom);
-}
-
-#app {
-  min-height: 100vh;
 }
 
 input, select, textarea, button {
@@ -366,9 +363,9 @@ textarea.form-input {
 
 /* Navigation header */
 .header {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 50;
+  flex-shrink: 0;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   padding: 0.5rem 0;
@@ -486,6 +483,14 @@ textarea.form-input {
   overflow-y: auto;
 }
 
+/* App shell: the header reserves its own space above, and the main area is
+   the only scroller — page content scrolls below the header instead of
+   sliding underneath it. */
 main.container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   padding-bottom: 2rem;
 }
