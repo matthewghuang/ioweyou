@@ -173,6 +173,8 @@ if (typeof document !== 'undefined' && !document.getElementById('swipe-reveal-st
       min-width: 80px;
       max-width: 120px;
       border: none;
+      /* Match the card's radius so no red corner peeks out behind it */
+      border-radius: 0 var(--radius, 8px) var(--radius, 8px) 0;
       color: #fff;
       font-size: 0.85rem;
       font-weight: 600;
