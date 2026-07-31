@@ -42,6 +42,12 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: cd frontend && npx playwright install chromium webkit
 
+      # ubuntu-latest runners lack WebKit's system libraries (chromium's are
+      # present). Browsers come from the cache above; the apt packages do not,
+      # so this step runs unconditionally.
+      - name: Install browser system dependencies
+        run: cd frontend && npx playwright install-deps chromium webkit
+
       - name: Build Go backend
         run: go build -o ioweyou ./cmd/server
 
